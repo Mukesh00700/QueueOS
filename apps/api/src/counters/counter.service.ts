@@ -43,6 +43,7 @@ export class CounterService {
     if (!counter) throw new NotFoundException('Counter not found');
     this.assertBranchAccess(counter.branchId, user);
     if (dto.queueId) await this.requireQueueInBranch(dto.queueId, counter.branchId);
+    if (dto.staffUserId) await this.requireStaffInBranch(dto.staffUserId, counter.branchId);
     return this.prisma.counter.update({ where: { id: counterId }, data: dto });
   }
 
@@ -51,6 +52,28 @@ export class CounterService {
     if (!queue || queue.branchId !== branchId) {
       throw new BadRequestException('That queue does not belong to this branch');
     }
+  }
+
+  private async requireStaffInBranch(staffUserId: string, branchId: string) {
+    const staff = await this.prisma.staffUser.findUnique({ where: { id: staffUserId }, select: { branchId: true } });
+    if (!staff || staff.branchId !== branchId) {
+      throw new BadRequestException('That staff member does not belong to this branch');
+    }
+  }
+
+  /**
+   * "Where do I work?" — every counter this staff member is assigned to, so
+   * login can send them straight there instead of the admin-only branches
+   * list. Self-scoped by construction (filtered to the caller's own id), so
+   * no branch/org check is needed beyond authentication.
+   */
+  async mine(user: JwtPayload) {
+    const counters = await this.prisma.counter.findMany({
+      where: { staffUserId: user.sub },
+      include: { queue: { select: { name: true } } },
+      orderBy: { name: 'asc' },
+    });
+    return counters.map((c) => ({ id: c.id, name: c.name, queueName: c.queue?.name ?? null }));
   }
 
   async view(counterId: string, user?: JwtPayload) {

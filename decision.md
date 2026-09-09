@@ -238,6 +238,52 @@ typecheck` across all three workspaces stayed clean throughout.
 
 ---
 
+## 2026-09-09 — CORS was silently blocking every PATCH/DELETE from the browser
+
+**Decision:** `main.ts`'s `app.enableCors(...)` now explicitly lists
+`methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE']`. It previously passed
+only `{ origin, credentials }`, relying on `@fastify/cors`'s own default —
+which turns out to be `GET, HEAD, POST`, confirmed directly (`curl -X
+OPTIONS ... -H "Access-Control-Request-Method: PATCH"` came back with
+`access-control-allow-methods: GET,HEAD,POST`). Every `PATCH` and
+`DELETE` request made *from the browser* — editing a staff member,
+branch, queue, counter, or product; removing a cart line — was being
+silently blocked by the browser's own CORS preflight check before it
+ever reached the server. The user saw this as a bare "Failed to fetch"
+with no further detail, on the Staff "Save changes" button specifically,
+though the same root cause affects every PATCH/DELETE surface in the
+app.
+
+**Reason:** every prior phase's verification in this session ran through
+`curl` or direct `fetch` calls made from `node -e` scripts — neither
+goes through a browser's CORS enforcement, so this had zero chance of
+surfacing in any of that testing, however thorough. It only became
+visible once the user exercised the real UI in a real browser. This is
+also the actual explanation for a DELETE failure spotted earlier this
+session (removing a cart item, Phase 2 of the POS work) that was
+incorrectly attributed to "a sandbox browser-tool networking quirk" at
+the time — it was this same bug, just not investigated far enough to
+find the real cause.
+
+**Impact:** no API contract change, no new endpoint — purely a
+transport-layer fix. Every existing PATCH/DELETE endpoint (staff,
+branches, queues, counters, products, order items, service types)
+becomes reachable from the browser for the first time; nothing about
+what those endpoints do changes.
+
+**Verified:** direct `curl -X OPTIONS` before/after showing the
+`Access-Control-Allow-Methods` header change from `GET,HEAD,POST` to
+`GET, POST, PATCH, PUT, DELETE`. Reproduced the original failure live in
+the browser (edited a staff member's name, `Failed to fetch` shown
+inline, confirmed via the network log and console that the PATCH itself
+was CORS-blocked after a successful OPTIONS preflight, and confirmed via
+a direct API query that the edit had *not* applied server-side). After
+the fix, repeated the identical edit through the same UI and confirmed
+the name change persisted. `test-flow.sh` (curl-based, so it could never
+have caught this) and full `npm run typecheck` stayed clean.
+
+---
+
 ## 2026-09-09 — Stopping POS depth after `plan.md` 1a–1d
 
 **Decision:** POS work stops here. `plan.md` Phase 1e (shift close/cash

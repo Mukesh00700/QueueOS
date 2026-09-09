@@ -111,6 +111,10 @@ function CreateStaffCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const roles = assignableRolesFor(user);
+  // The least-privileged role available to this actor — a new hire is
+  // almost always floor staff, never another Owner. Defaulting a role
+  // picker to the *most* privileged option is exactly backwards.
+  const defaultRole = roles[roles.length - 1];
   const isOwner = ROLE_RANK[user.role as keyof typeof ROLE_RANK] >= ROLE_RANK.OWNER;
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -123,7 +127,7 @@ function CreateStaffCard({
         name: String(form.get('name') ?? ''),
         email: String(form.get('email') ?? ''),
         password: String(form.get('password') ?? ''),
-        role: String(form.get('role') ?? roles[0]),
+        role: String(form.get('role') ?? defaultRole),
         branchId: isOwner ? String(form.get('branchId') ?? '') || undefined : undefined,
       });
       setOpen(false);
@@ -164,7 +168,7 @@ function CreateStaffCard({
           </label>
           <label className="block">
             <span className="mb-1.5 block text-sm font-medium">Role</span>
-            <Select name="role" defaultValue={roles[0]}>
+            <Select name="role" defaultValue={defaultRole}>
               {roles.map((r) => (
                 <option key={r} value={r}>
                   {r.replace('_', ' ')}
@@ -215,6 +219,8 @@ function StaffRowItem({
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [resettingPassword, setResettingPassword] = useState(false);
+  const [newPassword, setNewPassword] = useState('');
   const roles = assignableRolesFor(user);
   const isOwner = ROLE_RANK[user.role as keyof typeof ROLE_RANK] >= ROLE_RANK.OWNER;
   const canEditThis = ROLE_RANK[member.role as keyof typeof ROLE_RANK] < ROLE_RANK[user.role as keyof typeof ROLE_RANK] || isOwner;
@@ -240,14 +246,26 @@ function StaffRowItem({
     }
   }
 
-  async function resetPassword() {
-    const password = window.prompt(`New temporary password for ${member.name} (min 8 characters):`);
-    if (!password) return;
+  // Inline form instead of window.prompt() — a native dialog is unreliable
+  // inside embedded/webview browsers (VS Code's Simple Browser among them)
+  // and any failure there bypasses this component's own error handling.
+  // A plain button, not a nested <form> — forms can't nest inside the
+  // outer edit form.
+  async function submitPasswordReset() {
+    if (newPassword.length < 8) {
+      setError('Password must be at least 8 characters');
+      return;
+    }
+    setBusy(true);
     setError(null);
     try {
-      await api.resetStaffPassword(member.id, password);
+      await api.resetStaffPassword(member.id, newPassword);
+      setResettingPassword(false);
+      setNewPassword('');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not reset password');
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -291,13 +309,47 @@ function StaffRowItem({
           Active
         </label>
 
+        {resettingPassword ? (
+          <div className="space-y-2 rounded-xl border border-line bg-raised p-3">
+            <label className="block">
+              <span className="mb-1.5 block text-sm font-medium">New temporary password</span>
+              <input
+                type="text"
+                required
+                minLength={8}
+                autoComplete="off"
+                placeholder="At least 8 characters"
+                value={newPassword}
+                onChange={(event) => setNewPassword(event.target.value)}
+                className={INPUT}
+              />
+            </label>
+            <div className="flex items-center gap-2">
+              <Button type="button" size="sm" loading={busy} onClick={submitPasswordReset}>
+                Set password
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setResettingPassword(false);
+                  setNewPassword('');
+                }}
+              >
+                Cancel
+              </Button>
+            </div>
+          </div>
+        ) : null}
+
         {error ? <p className="text-sm font-medium text-danger">{error}</p> : null}
 
         <div className="flex items-center gap-2">
           <Button type="submit" loading={busy}>
             Save changes
           </Button>
-          <Button type="button" variant="ghost" onClick={resetPassword}>
+          <Button type="button" variant="ghost" onClick={() => setResettingPassword(true)}>
             <KeyRound size={14} /> Reset password
           </Button>
           <Button type="button" variant="ghost" onClick={() => setEditing(false)}>

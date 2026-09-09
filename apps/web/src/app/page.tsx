@@ -27,6 +27,11 @@ export default function LauncherPage() {
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
   const [branches, setBranches] = useState<BranchSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Distinguishes "the API process isn't running" (genuinely fix with `npm
+  // run dev`) from "signed in, but this account isn't Admin/Owner" (`/branches`
+  // is staff-management-only — a floor-staff account was never meant to land
+  // here at all, it should have a direct link to its own counter instead).
+  const [errorKind, setErrorKind] = useState<'connection' | 'forbidden' | 'other'>('connection');
 
   useEffect(() => {
     api
@@ -39,41 +44,18 @@ export default function LauncherPage() {
       .catch((e) => {
         if (e instanceof ApiError && e.status === 401) {
           setSignedIn(false);
+        } else if (e instanceof ApiError && e.status === 403) {
+          setError("You're signed in, but this account doesn't have branch access.");
+          setErrorKind('forbidden');
+        } else if (e instanceof ApiError) {
+          setError(e.message);
+          setErrorKind('other');
         } else {
-          setError(e instanceof Error ? e.message : 'Could not reach the API');
+          setError('Could not reach the API');
+          setErrorKind('connection');
         }
       });
   }, []);
-
-  if (signedIn === false) {
-    return (
-      <div className="grid min-h-screen place-items-center bg-surface p-6 text-fg">
-        <div className="w-full max-w-sm text-center">
-          <div className="mx-auto mb-5 grid h-11 w-11 place-items-center rounded-2xl bg-accent text-white">
-            <Activity size={22} strokeWidth={2.5} />
-          </div>
-          <h1 className="text-xl font-bold tracking-tight">QueueOS</h1>
-          <p className="mt-2 text-sm text-muted">
-            Sign in to see your branches, or register a new business to get started.
-          </p>
-          <div className="mt-5 flex items-center justify-center gap-3">
-            <Link
-              href="/register"
-              className="inline-flex h-11 items-center justify-center rounded-xl bg-accent px-5 text-sm font-medium text-accent-fg hover:brightness-110"
-            >
-              Register your business
-            </Link>
-            <Link
-              href="/login"
-              className="inline-flex h-11 items-center justify-center rounded-xl border border-line px-5 text-sm font-medium hover:border-line-strong"
-            >
-              Sign in
-            </Link>
-          </div>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="min-h-screen bg-surface text-fg">
@@ -104,37 +86,68 @@ export default function LauncherPage() {
               industry.
             </p>
           </div>
+
+          {signedIn === false ? (
+            <div className="flex items-center gap-3">
+              <Link
+                href="/register"
+                className="inline-flex h-11 items-center justify-center rounded-xl bg-accent px-5 text-sm font-medium text-accent-fg hover:brightness-110"
+              >
+                Register your business
+              </Link>
+              <Link
+                href="/login"
+                className="inline-flex h-11 items-center justify-center rounded-xl border border-line px-5 text-sm font-medium hover:border-line-strong"
+              >
+                Sign in
+              </Link>
+            </div>
+          ) : null}
         </header>
 
-        <section className="mt-14">
-          <div className="mb-4 flex items-baseline justify-between">
-            <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">Branches</h2>
-            {branches ? (
-              <span className="text-xs text-subtle">{branches.length} live</span>
-            ) : null}
-          </div>
+        {signedIn === false ? null : (
+          <section className="mt-14">
+            <div className="mb-4 flex items-baseline justify-between">
+              <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">Branches</h2>
+              {branches ? (
+                <span className="text-xs text-subtle">{branches.length} live</span>
+              ) : null}
+            </div>
 
-          {error ? (
-            <Card className="p-6">
-              <p className="text-sm font-medium text-danger">{error}</p>
-              <p className="mt-1 text-xs text-muted">
-                Start the API with <code className="text-fg">npm run dev</code> and reload.
-              </p>
-            </Card>
-          ) : !branches ? (
-            <div className="grid gap-4 sm:grid-cols-2">
-              {[0, 1, 2, 3].map((i) => (
-                <Skeleton key={i} className="h-36" />
-              ))}
-            </div>
-          ) : (
-            <div className="grid gap-4 sm:grid-cols-2">
-              {branches.map((branch) => (
-                <BranchCard key={branch.id} branch={branch} />
-              ))}
-            </div>
-          )}
-        </section>
+            {error ? (
+              <Card className="p-6">
+                <p className="text-sm font-medium text-danger">{error}</p>
+                {errorKind === 'connection' ? (
+                  <p className="mt-1 text-xs text-muted">
+                    Start the API with <code className="text-fg">npm run dev</code> and reload.
+                  </p>
+                ) : errorKind === 'forbidden' ? (
+                  <p className="mt-1 text-xs text-muted">
+                    Floor staff (counter, reception) don&apos;t browse branches here. If you
+                    haven&apos;t been assigned a counter yet, ask your manager to assign you one
+                    from Setup → Counters — signing in will then send you straight there.{' '}
+                    <Link href="/login" className="font-medium text-accent hover:underline">
+                      Sign in with a different account
+                    </Link>
+                    .
+                  </p>
+                ) : null}
+              </Card>
+            ) : !branches ? (
+              <div className="grid gap-4 sm:grid-cols-2">
+                {[0, 1, 2, 3].map((i) => (
+                  <Skeleton key={i} className="h-36" />
+                ))}
+              </div>
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-2">
+                {branches.map((branch) => (
+                  <BranchCard key={branch.id} branch={branch} />
+                ))}
+              </div>
+            )}
+          </section>
+        )}
 
         <footer className="mt-16 flex flex-wrap items-center gap-x-6 gap-y-2 border-t border-line pt-6 text-xs text-muted">
           <span className="flex items-center gap-1.5">

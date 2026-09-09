@@ -129,7 +129,14 @@ export interface CounterRow {
   status: string;
   providerName: string | null;
   queueId: string | null;
+  staffUserId: string | null;
   queue?: { id: string; name: string } | null;
+}
+
+export interface MyCounter {
+  id: string;
+  name: string;
+  queueName: string | null;
 }
 
 export interface CheckinInfo {
@@ -374,6 +381,7 @@ export const api = {
   updateCounter: (counterId: string, body: Partial<{ name: string; queueId: string | null; staffUserId: string | null }>) =>
     request<CounterRow>(`/counters/${counterId}`, { method: 'PATCH', body: JSON.stringify(body) }),
   branchCounters: (branchId: string) => request<CounterRow[]>(`/branches/${branchId}/counters`),
+  myCounters: () => request<MyCounter[]>('/counters/mine'),
   activity: (branchId: string, limit = 25) =>
     request<ActivityEntry[]>(`/branches/${branchId}/activity?limit=${limit}`),
 

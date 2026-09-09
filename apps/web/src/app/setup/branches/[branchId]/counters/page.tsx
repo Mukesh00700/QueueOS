@@ -3,9 +3,9 @@
 import { use, useEffect, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, Monitor, Plus } from 'lucide-react';
+import { ArrowLeft, ExternalLink, Monitor, Plus } from 'lucide-react';
 import { ROLE_RANK } from '@queueos/core';
-import { api, type AuthUser, type BranchSummary, type CounterRow, type QueueDetail } from '@/lib/api';
+import { api, type AuthUser, type BranchSummary, type CounterRow, type QueueDetail, type StaffRow } from '@/lib/api';
 import { SetupShell } from '@/components/setup-shell';
 import { Button, Card, CardHeader, EmptyState, Pill, Select, Skeleton } from '@/components/ui';
 
@@ -19,18 +19,21 @@ export default function CountersSetupPage({ params }: { params: Promise<{ branch
   const [branch, setBranch] = useState<BranchSummary | null>(null);
   const [queues, setQueues] = useState<QueueDetail[]>([]);
   const [counters, setCounters] = useState<CounterRow[] | null>(null);
+  const [staff, setStaff] = useState<StaffRow[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   async function load() {
     try {
-      const [branches, qs, cs] = await Promise.all([
+      const [branches, qs, cs, allStaff] = await Promise.all([
         api.branches(),
         api.branchQueueConfig(branchId),
         api.branchCounters(branchId),
+        api.staff(),
       ]);
       setBranch(branches.find((b) => b.id === branchId) ?? null);
       setQueues(qs);
       setCounters(cs);
+      setStaff(allStaff.filter((s) => s.branchId === branchId));
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Could not load counters');
     }
@@ -80,7 +83,7 @@ export default function CountersSetupPage({ params }: { params: Promise<{ branch
         </Card>
       ) : null}
 
-      <CreateCounterCard branchId={branchId} queues={queues} onCreated={load} />
+      <CreateCounterCard branchId={branchId} queues={queues} staff={staff} onCreated={load} />
 
       <Card>
         <CardHeader
@@ -93,7 +96,7 @@ export default function CountersSetupPage({ params }: { params: Promise<{ branch
             <EmptyState title="No counters yet" detail="Create your first counter above." />
           ) : (
             (counters ?? []).map((c) => (
-              <CounterRowItem key={c.id} counter={c} queues={queues} onSaved={load} />
+              <CounterRowItem key={c.id} counter={c} queues={queues} staff={staff} onSaved={load} />
             ))
           )}
         </div>
@@ -105,10 +108,12 @@ export default function CountersSetupPage({ params }: { params: Promise<{ branch
 function CreateCounterCard({
   branchId,
   queues,
+  staff,
   onCreated,
 }: {
   branchId: string;
   queues: QueueDetail[];
+  staff: StaffRow[];
   onCreated: () => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -121,10 +126,12 @@ function CreateCounterCard({
     setBusy(true);
     setError(null);
     try {
-      await api.createCounter(branchId, {
+      const counter = await api.createCounter(branchId, {
         name: String(form.get('name') ?? ''),
         queueId: String(form.get('queueId') ?? '') || undefined,
       });
+      const staffUserId = String(form.get('staffUserId') ?? '');
+      if (staffUserId) await api.updateCounter(counter.id, { staffUserId });
       setOpen(false);
       onCreated();
     } catch (err) {
@@ -163,6 +170,20 @@ function CreateCounterCard({
             </Select>
           </label>
         </div>
+        <label className="block">
+          <span className="mb-1.5 block text-sm font-medium">Assigned staff (optional)</span>
+          <Select name="staffUserId" defaultValue="">
+            <option value="">Unassigned — anyone with the link can operate it</option>
+            {staff.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} ({s.role.replace('_', ' ').toLowerCase()})
+              </option>
+            ))}
+          </Select>
+          <span className="mt-1 block text-xs text-subtle">
+            Signing in sends this person straight here — no link to share.
+          </span>
+        </label>
         {error ? <p className="text-sm font-medium text-danger">{error}</p> : null}
         <div className="flex items-center gap-2">
           <Button type="submit" loading={busy}>
@@ -180,15 +201,18 @@ function CreateCounterCard({
 function CounterRowItem({
   counter,
   queues,
+  staff,
   onSaved,
 }: {
   counter: CounterRow;
   queues: QueueDetail[];
+  staff: StaffRow[];
   onSaved: () => void;
 }) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const assignedStaff = staff.find((s) => s.id === counter.staffUserId);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -197,9 +221,11 @@ function CounterRowItem({
     setError(null);
     try {
       const queueId = String(form.get('queueId') ?? '');
+      const staffUserId = String(form.get('staffUserId') ?? '');
       await api.updateCounter(counter.id, {
         name: String(form.get('name') ?? ''),
         queueId: queueId || null,
+        staffUserId: staffUserId || null,
       });
       setEditing(false);
       onSaved();
@@ -230,6 +256,20 @@ function CounterRowItem({
             </Select>
           </label>
         </div>
+        <label className="block">
+          <span className="mb-1.5 block text-sm font-medium">Assigned staff</span>
+          <Select name="staffUserId" defaultValue={counter.staffUserId ?? ''}>
+            <option value="">Unassigned — anyone with the link can operate it</option>
+            {staff.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} ({s.role.replace('_', ' ').toLowerCase()})
+              </option>
+            ))}
+          </Select>
+          <span className="mt-1 block text-xs text-subtle">
+            Signing in sends this person straight here — no link to share.
+          </span>
+        </label>
         {error ? <p className="text-sm font-medium text-danger">{error}</p> : null}
         <div className="flex items-center gap-2">
           <Button type="submit" loading={busy}>
@@ -249,6 +289,7 @@ function CounterRowItem({
         <p className="truncate text-sm font-semibold">{counter.name}</p>
         <p className="text-xs text-muted">
           {counter.queue?.name ?? 'Unassigned'}
+          {assignedStaff ? ` · ${assignedStaff.name}` : ' · No staff assigned'}
           {counter.providerName ? ` · ${counter.providerName}` : ''}
         </p>
       </div>
@@ -256,6 +297,11 @@ function CounterRowItem({
         <Pill tone={counter.status === 'SERVING' ? 'success' : counter.status === 'CLOSED' ? 'danger' : 'neutral'}>
           {counter.status.toLowerCase()}
         </Pill>
+        <Link href={`/counter/${counter.id}`} target="_blank">
+          <Button variant="ghost" size="sm">
+            <ExternalLink size={13} /> Open
+          </Button>
+        </Link>
         <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
           Edit
         </Button>

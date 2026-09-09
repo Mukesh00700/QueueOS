@@ -13,7 +13,15 @@ async function bootstrap() {
 
   const webOrigin = process.env.WEB_ORIGIN ?? 'http://localhost:3000';
 
-  app.enableCors({ origin: webOrigin, credentials: true });
+  // @fastify/cors's own default method list is GET,HEAD,POST — too narrow
+  // for a REST API that PATCHes and DELETEs constantly (every Setup edit
+  // form uses PATCH). Spelled out explicitly rather than relying on a
+  // default that silently blocks half the app's own mutations.
+  app.enableCors({
+    origin: webOrigin,
+    credentials: true,
+    methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
+  });
   app.setGlobalPrefix('api');
 
   // Socket.IO rides on the same HTTP server as the REST API so there is one

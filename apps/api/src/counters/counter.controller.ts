@@ -21,6 +21,12 @@ const statusSchema = z.object({ status: z.enum(['IDLE', 'BREAK', 'CLOSED']) });
 export class CounterController {
   constructor(private readonly counters: CounterService) {}
 
+  /** Declared before `:id` — otherwise Nest would match "mine" as an id. */
+  @Get('mine')
+  mine(@Req() req: AuthedRequest) {
+    return this.counters.mine(req.user!);
+  }
+
   @Get(':id')
   view(@Param('id') id: string, @Req() req: AuthedRequest) {
     return this.counters.view(id, req.user);

@@ -4,7 +4,8 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { Suspense, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { Activity } from 'lucide-react';
-import { api, setStoredToken } from '@/lib/api';
+import { ROLE_RANK } from '@queueos/core';
+import { api, setStoredToken, type MyCounter } from '@/lib/api';
 import { Button, Card } from '@/components/ui';
 
 export default function LoginPage() {
@@ -18,10 +19,13 @@ export default function LoginPage() {
 function LoginForm() {
   const router = useRouter();
   const params = useSearchParams();
-  const next = params.get('next') ?? '/';
+  // Only set when something (an auth-guarded page) sent the user here for a
+  // specific reason — that always wins over the role-based default below.
+  const explicitNext = params.get('next');
 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [pickCounter, setPickCounter] = useState<MyCounter[] | null>(null);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -34,11 +38,68 @@ function LoginForm() {
         String(form.get('password') ?? ''),
       );
       setStoredToken(result.accessToken);
-      router.replace(next);
+
+      if (explicitNext) {
+        router.replace(explicitNext);
+        return;
+      }
+
+      // No specific destination requested. Floor staff (below Admin rank)
+      // have no business on the admin-only branches list — send them
+      // straight to whichever counter they're assigned to instead.
+      const rank = ROLE_RANK[result.user.role as keyof typeof ROLE_RANK];
+      if (rank < ROLE_RANK.ADMIN) {
+        const counters = await api.myCounters();
+        if (counters.length === 1) {
+          router.replace(`/counter/${counters[0].id}`);
+          return;
+        }
+        if (counters.length > 1) {
+          setPickCounter(counters);
+          setBusy(false);
+          return;
+        }
+        // Zero assigned — nothing to route to yet; fall through to "/",
+        // which shows a clear "ask your manager to assign you" message.
+      }
+      router.replace('/');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign in failed');
       setBusy(false);
     }
+  }
+
+  if (pickCounter) {
+    return (
+      <div className="grid min-h-screen place-items-center bg-surface px-5 text-fg">
+        <div className="w-full max-w-sm">
+          <div className="mb-6 flex items-center gap-3">
+            <div className="grid h-10 w-10 place-items-center rounded-xl bg-accent text-white">
+              <Activity size={20} strokeWidth={2.5} />
+            </div>
+            <div>
+              <p className="text-base font-bold tracking-tight">QueueOS</p>
+              <p className="text-xs text-muted">Which counter are you working?</p>
+            </div>
+          </div>
+          <Card className="p-3">
+            <div className="space-y-1.5">
+              {pickCounter.map((c) => (
+                <button
+                  key={c.id}
+                  type="button"
+                  onClick={() => router.replace(`/counter/${c.id}`)}
+                  className="flex w-full items-center justify-between rounded-xl border border-line bg-raised px-4 py-3 text-left text-sm transition-colors hover:border-accent"
+                >
+                  <span className="font-medium">{c.name}</span>
+                  <span className="text-xs text-muted">{c.queueName ?? 'Unassigned'}</span>
+                </button>
+              ))}
+            </div>
+          </Card>
+        </div>
+      </div>
+    );
   }
 
   return (
