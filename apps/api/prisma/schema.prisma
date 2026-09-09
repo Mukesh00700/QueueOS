@@ -37,6 +37,8 @@ model Organization {
   customers  Customer[]
   visits     Visit[]
   orders     Order[]
+  products   Product[]
+  invoices   Invoice[]
   events     QueueEvent[]
 }
 
@@ -51,6 +53,9 @@ model Branch {
   vertical       String?
   openTime       String  @default("09:00")
   closeTime      String  @default("18:00")
+  /// Next invoice number to issue for this branch; same pattern as
+  /// Queue.nextNumber.
+  nextInvoiceNumber Int @default(1)
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -61,6 +66,7 @@ model Branch {
   tokens       Token[]
   visits       Visit[]
   orders       Order[]
+  invoices     Invoice[]
   events       QueueEvent[]
 
   @@unique([organizationId, code])
@@ -235,18 +241,52 @@ model Visit {
 }
 
 // ---------------------------------------------------------------------------
-// Minimal commerce — just enough for a PAYMENT-typed stage to be real. Cart
-// UI, GST invoicing, inventory and loyalty stay their own larger follow-on
-// effort per plan.md; this is only what auto-advance needs to gate on an
-// actual payment instead of a staff button. See build-plan.md Phase 8.
+// Commerce — line items, invoices, catalogue, stock. Started minimal in
+// build-plan.md Phase 8 (just enough for a PAYMENT-typed stage to gate on a
+// real payment) and extended here into the real thing per plan.md Phase 1a.
+// Still deliberately small: GST calculation, the cart-building POS UI, shift
+// close and stock depletion are their own later steps — see plan.md.
 // ---------------------------------------------------------------------------
+
+model Product {
+  id             String @id @default(cuid())
+  organizationId String
+  name           String
+  /// Free-text grouping — display/filtering only. GST rate is set directly
+  /// per product below, not looked up by this string: real GST is assigned
+  /// per HSN/SAC code, not by a loosely-typed category label.
+  category       String
+  price          Float
+  /// HSN (goods) or SAC (services) code, for GST invoicing. Optional until
+  /// that step actually needs it.
+  hsnSac         String?
+  /// GST percentage (e.g. 18 for 18%) applied to this product's line items.
+  /// A flat rate table, not a tax service — see plan.md Phase 1d.
+  gstRate        Float    @default(0)
+  /// Opt-in: most verticals (hospital, salon, temple) sell nothing that
+  /// needs stock tracked; a retail/QSR product can turn this on.
+  trackStock     Boolean  @default(false)
+  active         Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  orderItems     OrderItem[]
+  stockMovements StockMovement[]
+
+  @@index([organizationId])
+}
 
 model Order {
   id             String @id @default(cuid())
   organizationId String
   branchId       String
   visitId        String
-  amount         Float
+  /// Denormalised sum of `items[].lineTotal`, recomputed whenever items
+  /// change — same "recalculate on mutation" shape as a queue's live stats.
+  subtotal       Float    @default(0)
+  /// Denormalised sum of each item's `lineTotal * gstRate / 100`, recomputed
+  /// alongside `subtotal`.
+  taxAmount      Float    @default(0)
   /// OrderStatus: OPEN | PAID.
   status         String   @default("OPEN")
   createdAt      DateTime @default(now())
@@ -254,24 +294,99 @@ model Order {
   organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
   visit        Visit        @relation(fields: [visitId], references: [id], onDelete: Cascade)
-  payment      Payment?
+  items        OrderItem[]
+  invoice      Invoice?
 
   @@index([visitId])
   @@index([branchId, createdAt])
 }
 
+model OrderItem {
+  id          String @id @default(cuid())
+  orderId     String
+  /// Nullable — an ad-hoc line (today's "just type an amount") doesn't need
+  /// a catalogue entry.
+  productId   String?
+  description String
+  quantity    Int    @default(1)
+  unitPrice   Float
+  lineTotal   Float
+  /// Snapshotted from Product.gstRate at add-time — same reasoning as
+  /// unitPrice/description already being copied rather than live-joined: a
+  /// later rate change shouldn't rewrite an invoice that already went out.
+  gstRate     Float  @default(0)
+  /// Staff who rang up this line. Plain id, no FK — same loose-actor
+  /// convention as QueueEvent.actorId. This is the line-level attribution
+  /// commission/productivity reporting needs later.
+  staffUserId String?
+
+  order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([orderId])
+  @@index([productId])
+}
+
+model Invoice {
+  id             String @id @default(cuid())
+  organizationId String
+  branchId       String
+  orderId        String @unique
+  /// Per-branch incrementing series, e.g. "INV-42" — same pattern as
+  /// Queue.nextNumber.
+  number         String
+  subtotal       Float
+  /// Sum of the order's item-level GST at issue time. 0 for an ad-hoc line
+  /// (no product, no rate) — the flat "type an amount" fallback never gets
+  /// taxed.
+  taxAmount      Float    @default(0)
+  total          Float
+  /// InvoiceStatus: ISSUED | VOID.
+  status         String   @default("ISSUED")
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  order        Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  payments     Payment[]
+
+  @@unique([branchId, number])
+  @@index([branchId, createdAt])
+}
+
 model Payment {
-  id      String @id @default(cuid())
-  orderId String @unique
-  amount  Float
+  id        String @id @default(cuid())
+  /// Not unique — an invoice can carry multiple payments for split tender,
+  /// even though this step only ever writes one.
+  invoiceId String
+  amount    Float
   /// PaymentMethod from @queueos/core.
-  method  String
+  method    String
   /// Staff user who recorded it. Plain id, no FK — same loose-actor
   /// convention as QueueEvent.actorId.
   recordedBy String?
   recordedAt DateTime @default(now())
 
-  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+}
+
+model StockMovement {
+  id          String @id @default(cuid())
+  productId   String
+  /// The sale line that caused this movement, when there is one.
+  orderItemId String?
+  /// Negative on sale. No separate "current stock" table — stock-on-hand is
+  /// computed by summing movements, the same pattern QueueEvent already
+  /// uses for history. Inert until the depletion step writes to it.
+  quantity    Int
+  reason      String
+  occurredAt  DateTime @default(now())
+
+  product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
+
+  @@index([productId, occurredAt])
 }
 
 // ---------------------------------------------------------------------------

@@ -20,6 +20,10 @@ import { CounterController } from './counters/counter.controller';
 import { BranchController } from './branches/branch.controller';
 import { StaffService } from './staff/staff.service';
 import { StaffController } from './staff/staff.controller';
+import { ProductService } from './products/product.service';
+import { ProductController } from './products/product.controller';
+import { OrderService } from './products/order.service';
+import { OrderSessionService } from './products/order-session.service';
 import { InsightsService } from './insights/insights.service';
 import { RecallScheduler } from './recall/recall.scheduler';
 import { RealtimeGateway } from './realtime/realtime.gateway';
@@ -40,6 +44,7 @@ import { RealtimeGateway } from './realtime/realtime.gateway';
     CounterController,
     BranchController,
     StaffController,
+    ProductController,
   ],
   providers: [
     QueueService,
@@ -47,6 +52,9 @@ import { RealtimeGateway } from './realtime/realtime.gateway';
     AutoAdvanceService,
     CounterService,
     StaffService,
+    ProductService,
+    OrderService,
+    OrderSessionService,
     InsightsService,
     RecallScheduler,
     RealtimeGateway,

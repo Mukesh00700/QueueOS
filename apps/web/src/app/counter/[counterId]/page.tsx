@@ -6,11 +6,14 @@ import {
   BellRing,
   Check,
   ChevronRight,
+  Plus,
+  ShoppingCart,
   SkipForward,
   UserRound,
+  X,
 } from 'lucide-react';
 import { PAYMENT_METHODS } from '@queueos/core';
-import { api, type CounterView } from '@/lib/api';
+import { api, type CounterView, type ProductRow } from '@/lib/api';
 import { useLive } from '@/lib/use-live';
 import { useTheme } from '@/lib/theme';
 import { AnimatedNumber, Button, Card, Pill, Skeleton } from '@/components/ui';
@@ -84,20 +87,36 @@ function CounterConsole({
   const [actionError, setActionError] = useState<string | null>(null);
   const [confirmingSkip, setConfirmingSkip] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState('');
+  const [products, setProducts] = useState<ProductRow[]>([]);
 
   useEffect(() => {
     setVertical(view.vertical);
   }, [view.vertical, setVertical]);
 
-  const { counter, queue, current, upNext } = view;
+  // Catalogue barely changes during a shift — fetched once, not live-polled.
+  useEffect(() => {
+    api.products().then(setProducts).catch(() => {});
+  }, []);
+
+  const { counter, queue, current, upNext, order } = view;
   const holding = current !== null;
   const isPaymentStage = view.stageType === 'PAYMENT';
+  // A branch that's never configured a catalogue (hospital, salon, temple —
+  // every branch before this feature existed) should see no trace of it.
+  const hasCatalogue = products.some((p) => p.active);
 
   // A stale confirm/amount should never carry over onto whichever token comes next.
   useEffect(() => {
     setConfirmingSkip(false);
     setPaymentAmount('');
   }, [current?.id]);
+
+  // The tender amount tracks the cart's tax-inclusive total as it's built
+  // up — still manually editable after, e.g. for a vertical with no
+  // catalogue lines.
+  useEffect(() => {
+    if (order && order.total > 0) setPaymentAmount(String(order.total));
+  }, [order?.total]);
 
   async function run(action: 'next' | 'recall' | 'skip' | 'complete') {
     setPending(action);
@@ -107,6 +126,32 @@ function CounterConsole({
       onChange();
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Action failed');
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function addProduct(productId: string) {
+    setPending(`add-${productId}`);
+    setActionError(null);
+    try {
+      await api.addOrderItem(counter.id, productId);
+      onChange();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Could not add item');
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function removeItem(itemId: string) {
+    setPending(`remove-${itemId}`);
+    setActionError(null);
+    try {
+      await api.removeOrderItem(counter.id, itemId);
+      onChange();
+    } catch (err) {
+      setActionError(err instanceof Error ? err.message : 'Could not remove item');
     } finally {
       setPending(null);
     }
@@ -274,6 +319,16 @@ function CounterConsole({
         </div>
 
         <div className="space-y-6">
+          {holding && hasCatalogue ? (
+            <CartSection
+              order={order}
+              products={products}
+              pending={pending}
+              onAdd={addProduct}
+              onRemove={removeItem}
+            />
+          ) : null}
+
           <Card className="grid grid-cols-3 divide-x divide-line text-center">
             <Stat label="Waiting" value={queue.waiting} />
             <Stat label="Done today" value={queue.completedToday} />
@@ -318,6 +373,110 @@ function CounterConsole({
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * The cart for whoever's currently being served — "a counter already is
+ * the POS terminal." No search box, no custom-item entry, no quantity
+ * stepper: tap a product to add it, tap × to remove a line. A floor tool,
+ * not a form.
+ */
+function CartSection({
+  order,
+  products,
+  pending,
+  onAdd,
+  onRemove,
+}: {
+  order: CounterView['order'];
+  products: ProductRow[];
+  pending: string | null;
+  onAdd: (productId: string) => void;
+  onRemove: (itemId: string) => void;
+}) {
+  const categories = Array.from(new Set(products.filter((p) => p.active).map((p) => p.category)));
+
+  return (
+    <Card className="p-5">
+      <p className="mb-3 flex items-center gap-2 text-sm font-semibold">
+        <ShoppingCart size={15} /> Cart
+      </p>
+
+      {order && order.items.length > 0 ? (
+        <div className="mb-4 space-y-2">
+          {order.items.map((item) => (
+            <div key={item.id} className="flex items-center gap-3 rounded-xl border border-line bg-raised px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium">
+                  {item.quantity > 1 ? `${item.quantity}× ` : ''}
+                  {item.description}
+                </p>
+              </div>
+              <span className="tnum text-sm font-semibold">₹{item.lineTotal.toFixed(2)}</span>
+              {item.productId ? (
+                <button
+                  type="button"
+                  onClick={() => onRemove(item.id)}
+                  disabled={pending !== null}
+                  className="text-subtle transition-colors hover:text-danger disabled:opacity-50"
+                  aria-label={`Remove ${item.description}`}
+                >
+                  <X size={14} />
+                </button>
+              ) : null}
+            </div>
+          ))}
+          <div className="space-y-1 border-t border-line pt-2 text-sm">
+            <div className="flex items-center justify-between text-muted">
+              <span>Subtotal</span>
+              <span className="tnum">₹{order.subtotal.toFixed(2)}</span>
+            </div>
+            {order.taxAmount > 0 ? (
+              <div className="flex items-center justify-between text-muted">
+                <span>GST</span>
+                <span className="tnum">₹{order.taxAmount.toFixed(2)}</span>
+              </div>
+            ) : null}
+            <div className="flex items-center justify-between font-semibold">
+              <span>Total</span>
+              <span className="tnum">₹{order.total.toFixed(2)}</span>
+            </div>
+          </div>
+        </div>
+      ) : (
+        <p className="mb-4 text-xs text-subtle">No items yet — tap a product to add it.</p>
+      )}
+
+      {categories.length === 0 ? (
+        <p className="text-xs text-subtle">No products set up yet — add some from Setup.</p>
+      ) : (
+        <div className="space-y-3">
+          {categories.map((category) => (
+            <div key={category}>
+              <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-subtle">{category}</p>
+              <div className="flex flex-wrap gap-1.5">
+                {products
+                  .filter((p) => p.active && p.category === category)
+                  .map((product) => (
+                    <button
+                      key={product.id}
+                      type="button"
+                      onClick={() => onAdd(product.id)}
+                      disabled={pending !== null}
+                      className="flex items-center gap-1.5 rounded-lg border border-line bg-raised px-2.5 py-1.5 text-xs font-medium transition-colors hover:border-accent disabled:opacity-50"
+                    >
+                      <Plus size={11} className="text-accent" />
+                      {product.name}
+                      <span className="text-subtle">₹{product.price.toFixed(0)}</span>
+                    </button>
+                  ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </Card>
   );
 }
 

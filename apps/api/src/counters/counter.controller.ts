@@ -1,9 +1,16 @@
-import { Body, Controller, Get, Param, Patch, Post, Req } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Req } from '@nestjs/common';
 import { z } from 'zod';
 import { CounterService } from './counter.service';
 import { MinRole, type AuthedRequest } from '../auth/auth.guard';
 import { ZodBody } from '../common/zod.pipe';
-import { recordPaymentSchema, updateCounterSchema, type RecordPaymentDto, type UpdateCounterDto } from './counter.dto';
+import {
+  addOrderItemSchema,
+  recordPaymentSchema,
+  updateCounterSchema,
+  type AddOrderItemDto,
+  type RecordPaymentDto,
+  type UpdateCounterDto,
+} from './counter.dto';
 
 const providerSchema = z.object({ providerName: z.string().trim().max(80).nullable() });
 const statusSchema = z.object({ status: z.enum(['IDLE', 'BREAK', 'CLOSED']) });
@@ -51,6 +58,20 @@ export class CounterController {
     @Req() req: AuthedRequest,
   ) {
     return this.counters.recordPayment(id, body, req.user);
+  }
+
+  @Post(':id/order/items')
+  addOrderItem(
+    @Param('id') id: string,
+    @Body(new ZodBody(addOrderItemSchema)) body: AddOrderItemDto,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.counters.addOrderItem(id, body, req.user);
+  }
+
+  @Delete(':id/order/items/:itemId')
+  removeOrderItem(@Param('id') id: string, @Param('itemId') itemId: string, @Req() req: AuthedRequest) {
+    return this.counters.removeOrderItem(id, itemId, req.user);
   }
 
   @Post(':id/provider')

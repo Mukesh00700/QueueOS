@@ -179,6 +179,24 @@ export interface TokenStatusResponse {
   nowServing: { displayCode: string; counterName: string | null } | null;
 }
 
+export interface OrderItemRow {
+  id: string;
+  productId: string | null;
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+  gstRate: number;
+}
+
+export interface OpenOrder {
+  id: string;
+  subtotal: number;
+  taxAmount: number;
+  total: number;
+  items: OrderItemRow[];
+}
+
 export interface CounterView {
   counter: { id: string; name: string; status: string; providerName: string | null };
   queue: QueueSnapshot;
@@ -186,6 +204,7 @@ export interface CounterView {
   vertical: string;
   current: TokenSnapshotDto | null;
   upNext: TokenSnapshotDto[];
+  order: OpenOrder | null;
 }
 
 export interface TokenSnapshotDto {
@@ -307,6 +326,28 @@ export const ASSIGNABLE_ROLES = [
   'CASHIER',
 ] as const;
 
+export interface ProductRow {
+  id: string;
+  organizationId: string;
+  name: string;
+  category: string;
+  price: number;
+  hsnSac: string | null;
+  gstRate: number;
+  trackStock: boolean;
+  active: boolean;
+  createdAt: string;
+}
+
+export interface ProductInput {
+  name: string;
+  category: string;
+  price: number;
+  hsnSac?: string;
+  gstRate?: number;
+  trackStock?: boolean;
+}
+
 export interface AuthUser {
   sub: string;
   email: string;
@@ -400,6 +441,18 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ amount, method }),
     }),
+  addOrderItem: (counterId: string, productId: string, quantity = 1) =>
+    request<CounterView>(`/counters/${counterId}/order/items`, {
+      method: 'POST',
+      body: JSON.stringify({ productId, quantity }),
+    }),
+  removeOrderItem: (counterId: string, itemId: string) =>
+    request<CounterView>(`/counters/${counterId}/order/items/${itemId}`, { method: 'DELETE' }),
+
+  products: () => request<ProductRow[]>('/products'),
+  createProduct: (body: ProductInput) => request<ProductRow>('/products', { method: 'POST', body: JSON.stringify(body) }),
+  updateProduct: (id: string, body: Partial<ProductInput> & { active?: boolean }) =>
+    request<ProductRow>(`/products/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
 
   staff: () => request<StaffRow[]>('/staff'),
   createStaff: (body: StaffInput) => request<StaffRow>('/staff', { method: 'POST', body: JSON.stringify(body) }),

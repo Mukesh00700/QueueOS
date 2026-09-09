@@ -4,9 +4,10 @@ import type { Counter, Token } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventBusService } from '../events/event-bus.service';
 import { QueueService } from '../queues/queue.service';
+import { OrderService } from '../products/order.service';
 import { formatDisplayCode, minutesBetween, IN_LINE_ORDER } from '../queues/queue.util';
 import type { JwtPayload } from '../auth/auth.service';
-import type { CreateCounterDto, RecordPaymentDto, UpdateCounterDto } from './counter.dto';
+import type { AddOrderItemDto, CreateCounterDto, RecordPaymentDto, UpdateCounterDto } from './counter.dto';
 
 /**
  * Counter operations — the four buttons on the reception tablet.
@@ -22,6 +23,7 @@ export class CounterService {
     private readonly prisma: PrismaService,
     private readonly events: EventBusService,
     private readonly queues: QueueService,
+    private readonly orders: OrderService,
   ) {}
 
   async create(branchId: string, dto: CreateCounterDto) {
@@ -72,6 +74,7 @@ export class CounterService {
       }),
       this.queues.snapshot(counter.queueId),
     ]);
+    const order = current ? await this.orders.currentOpenOrder(current.visitId) : null;
 
     return {
       counter: {
@@ -87,6 +90,23 @@ export class CounterService {
         ? this.queues.toSnapshot(current, counter.queue.tokenPrefix, null)
         : null,
       upNext: upNext.map((t, i) => this.queues.toSnapshot(t, counter.queue!.tokenPrefix, i)),
+      order: order
+        ? {
+            id: order.id,
+            subtotal: order.subtotal,
+            taxAmount: order.taxAmount,
+            total: order.subtotal + order.taxAmount,
+            items: order.items.map((item) => ({
+              id: item.id,
+              productId: item.productId,
+              description: item.description,
+              quantity: item.quantity,
+              unitPrice: item.unitPrice,
+              lineTotal: item.lineTotal,
+              gstRate: item.gstRate,
+            })),
+          }
+        : null,
     };
   }
 
@@ -292,11 +312,39 @@ export class CounterService {
   }
 
   /**
+   * Add a product to the visit's cart — any stage, not just Payment; "a
+   * counter already is the POS terminal." No `recalculate()` call: a cart
+   * line doesn't change queue position or ETA.
+   */
+  async addOrderItem(counterId: string, dto: AddOrderItemDto, user?: JwtPayload) {
+    const counter = await this.requireCounter(counterId, user);
+    const token = await this.currentToken(counterId);
+    if (!token) throw new BadRequestException('No token is being served at this counter');
+    await this.orders.addItem(token.visitId, dto.productId, dto.quantity, user?.sub ?? null);
+    return this.view(counterId, user);
+  }
+
+  async removeOrderItem(counterId: string, itemId: string, user?: JwtPayload) {
+    await this.requireCounter(counterId, user);
+    const token = await this.currentToken(counterId);
+    if (!token) throw new BadRequestException('No token is being served at this counter');
+    await this.orders.removeItem(token.visitId, itemId, user?.sub ?? null);
+    return this.view(counterId, user);
+  }
+
+  /**
    * The payment-stage equivalent of `complete` — closing this stage out is
-   * "payment recorded," not a staff button. Creates a minimal Order+Payment
-   * pair (see build-plan.md Phase 8) and reuses `completeToken`, so the
-   * resulting `ServiceCompleted` event feeds the same auto-advance
-   * mechanism from Phase 6 — no separate wiring needed.
+   * "payment recorded," not a staff button. Issues an Invoice off the
+   * visit's cart (opened automatically back when service started — see
+   * `OrderSessionService`) rather than always minting a fresh Order: if
+   * that cart already has real items, its own subtotal is the invoice
+   * total; if it's still empty (a vertical that never touches the
+   * catalogue), falls back to exactly build-plan.md Phase 8's behavior —
+   * one ad-hoc "Payment" line for the amount typed here. Reuses
+   * `completeToken`, so the resulting `ServiceCompleted` still feeds the
+   * same auto-advance mechanism from Phase 6 unchanged; `InvoiceIssued`/
+   * `PaymentCompleted` are published alongside it for the commerce-side
+   * consumers Phase 2+ will add.
    */
   async recordPayment(counterId: string, dto: RecordPaymentDto, user?: JwtPayload) {
     const counter = await this.requireCounter(counterId, user);
@@ -310,22 +358,77 @@ export class CounterService {
     }
 
     const organizationId = await this.queues.orgIdForBranch(counter.branchId);
-    const order = await this.prisma.order.create({
-      data: {
-        organizationId,
-        branchId: counter.branchId,
-        visitId: token.visitId,
-        amount: dto.amount,
-        status: 'PAID',
-      },
+    const { order: openOrder } = await this.orders.openOrGetOrder(token.visitId, counter.branchId, organizationId);
+
+    const invoice = await this.prisma.$transaction(async (tx) => {
+      const orderId = openOrder.id;
+      let subtotal = openOrder.subtotal;
+      let taxAmount = openOrder.taxAmount;
+
+      if (openOrder.items.length === 0) {
+        // The flat "type an amount" fallback — no product, no rate, no tax.
+        await tx.orderItem.create({
+          data: {
+            orderId,
+            description: 'Payment',
+            quantity: 1,
+            unitPrice: dto.amount,
+            lineTotal: dto.amount,
+            staffUserId: actorId ?? null,
+          },
+        });
+        subtotal = dto.amount;
+        taxAmount = 0;
+      }
+
+      await tx.order.update({ where: { id: orderId }, data: { subtotal, taxAmount, status: 'PAID' } });
+
+      const branch = await tx.branch.update({
+        where: { id: counter.branchId },
+        data: { nextInvoiceNumber: { increment: 1 } },
+        select: { nextInvoiceNumber: true },
+      });
+      const invoice = await tx.invoice.create({
+        data: {
+          organizationId,
+          branchId: counter.branchId,
+          orderId,
+          number: `INV-${branch.nextInvoiceNumber - 1}`,
+          subtotal,
+          taxAmount,
+          total: subtotal + taxAmount,
+          status: 'ISSUED',
+        },
+      });
+      await tx.payment.create({
+        data: { invoiceId: invoice.id, amount: dto.amount, method: dto.method, recordedBy: actorId ?? null },
+      });
+
+      return invoice;
     });
-    await this.prisma.payment.create({
-      data: { orderId: order.id, amount: dto.amount, method: dto.method, recordedBy: actorId ?? null },
+
+    const base = {
+      organizationId,
+      branchId: counter.branchId,
+      queueId: counter.queueId!,
+      tokenId: token.id,
+      actorId: actorId ?? null,
+    };
+    await this.events.publish({
+      ...base,
+      name: 'InvoiceIssued',
+      payload: { invoiceNumber: invoice.number, subtotal: invoice.subtotal, taxAmount: invoice.taxAmount, total: invoice.total },
+    });
+    await this.events.publish({
+      ...base,
+      name: 'PaymentCompleted',
+      payload: { invoiceNumber: invoice.number, amount: dto.amount, method: dto.method },
     });
 
     await this.completeToken(token, counter, actorId, 'PAYMENT_RECORDED', {
       amount: dto.amount,
       method: dto.method,
+      invoiceNumber: invoice.number,
     });
     await this.queues.recalculate(counter.queueId!, actorId);
     return this.view(counterId, user);

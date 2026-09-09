@@ -167,6 +167,248 @@ typecheck` across all three workspaces stayed clean throughout.
 
 ---
 
+## 2026-09-09 — Stopping POS depth after `plan.md` 1a–1d
+
+**Decision:** POS work stops here. `plan.md` Phase 1e (shift close/cash
+reconciliation) and 1f (stock depletion — `StockMovement` has sat inert
+since step 1, never gets written to) are **not built**. What exists:
+`Product`/`OrderItem`/`Invoice`/`Payment` with real GST, an auto-opening
+cart, and the counter tablet's POS terminal UI — but only for a branch
+that deliberately configures a catalogue. Every branch that doesn't
+(hospital, temple, salon, or any restaurant/retail branch that just
+wants "type an amount, tap a tender button") is completely unaffected
+and shows no trace of any of this.
+
+**Reason:** talking through why the cart existed at all surfaced the
+real question — this project's actual businesses span hospitals and
+temples that have no payment step at all, alongside restaurants/retail
+that do. The itemized-billing depth (GST, catalogue, per-line tender)
+only pays for itself for the latter, and the user chose not to keep
+building further into that depth (shift close, inventory) without a
+concrete need for it yet.
+
+**Impact:** the flat "type an amount, tap a tender button" path
+(build-plan.md Phase 8) is the one universal payment story every
+vertical gets. The itemized path is additive and fully opt-in — a
+branch only sees it once it adds its first product. Resuming 1e/1f later
+needs no rework of anything already built; both were designed as
+additive from the start (`StockMovement` already exists and is already
+correctly shaped, just unwritten-to).
+
+---
+
+## 2026-09-09 — Cart visibility fix + real GST calculation (`plan.md` 1d — POS foundation, step 3)
+
+**Decision:** Two changes. First, a correction to step 2: the counter
+tablet's cart section was showing on every branch's counter once someone
+was being served, even branches that have never configured a single
+Product — an empty "no products set up yet" card cluttering a hospital
+or temple screen that has nothing to do with POS. Now gated on `products.
+some(p => p.active)`: a branch with no catalogue shows zero trace of any
+of this work, exactly as it looked before Phase 8 existed. Second, real
+GST: `Product.gstRate` (percentage, one of the standard Indian slabs —
+new `GST_RATES = [0, 5, 12, 18, 28]` in `packages/core`), snapshotted
+onto `OrderItem.gstRate` at add-time (same reasoning as `unitPrice`/
+`description` already being copied rather than live-joined — a later
+rate change shouldn't rewrite an invoice that already went out).
+`OrderService`'s existing `recomputeSubtotal` (renamed `recomputeTotals`)
+now also sums `lineTotal * gstRate / 100` into a new denormalized
+`Order.taxAmount`, alongside `subtotal` — same "recalculate on mutation"
+shape. `CounterService.recordPayment` issues the invoice's `taxAmount`/
+`total` from those real per-item rates; the ad-hoc "Payment" fallback
+line (empty cart) keeps `taxAmount: 0` — a flat manually-typed amount
+never gets a surprise tax added. Web: Setup → Products gained a GST-rate
+select; the counter tablet's cart shows a Subtotal/GST/Total breakdown
+when tax is nonzero, and the payment amount now pre-fills to the
+tax-inclusive `order.total` instead of the pre-tax subtotal.
+
+**Reason:** the cart-visibility gap came directly from the user
+questioning why a queue system needs anything cart-shaped at all —
+`plan.md`'s own Phase 1 exit criterion never claimed every business needs
+this, only that a business *selling something* should have real
+itemized billing instead of a rubber-stamped number. The gate makes that
+scoping explicit in the UI, not just in the data model. On tax: `plan.md`
+1d's other two asks (invoice series, tender buttons) were already
+complete as of Step 1 — the invoice-series counter and four tender
+buttons both predate this entry — so this step is narrowly just the GST
+piece. Keeping `gstRate` a direct per-product field rather than a
+category-string lookup table (`plan.md`'s literal "flat rate table by
+category") is a deliberate correction: `category` is free-text today, so
+keying tax off it would silently break on a typo; GST is really assigned
+per product/HSN in practice, which is what a direct field gives you.
+
+**Impact:** additive schema only (`Product.gstRate`, `OrderItem.gstRate`,
+`Order.taxAmount`, all defaulting to 0) — `prisma db push` needed no
+reset. No behavior change for any branch with no product carrying a
+nonzero rate: subtotal, taxAmount 0, total = subtotal, identical to
+before this step.
+
+**Verified:** live API — created a Burger (₹100, 18% GST) and Fries (₹50,
+5% GST) on a fresh QSR org, added both to a cart, confirmed subtotal 150
+/ tax 20.5 (100×0.18 + 50×0.05, correctly mixing two different rates in
+one cart) / total 170.5, and confirmed the same numbers landed on the
+issued invoice unchanged. Re-ran the flat, no-catalogue payment flow from
+Step 2's backward-compatibility check and confirmed `taxAmount` is still
+exactly 0. Browser check: confirmed a no-catalogue hospital branch's
+counter now shows no cart card at all after NEXT (previously showed an
+empty one); confirmed the Products page's GST-rate select renders the
+standard slabs and correctly pre-fills 18% when editing the Burger.
+`test-flow.sh` and full `npm run typecheck` across all three workspaces
+stayed clean throughout.
+
+---
+
+## 2026-09-09 — Auto-open cart + POS terminal UI (`plan.md` 1b+1c — POS foundation, step 2)
+
+**Decision:** The cart now opens itself — Chapter 12's "no New Sale
+button" rule. New `OrderSessionService` (`apps/api/src/products/
+order-session.service.ts`, same `OnModuleInit`/event-subscriber shape as
+`AutoAdvanceService`) reacts to `ServiceStarted` and calls new
+`OrderService.openOrGetOrder(visitId, branchId, organizationId)`
+(`apps/api/src/products/order.service.ts`), which is idempotent *per
+visit* — the first stage's `ServiceStarted` creates the Order, every
+later stage's `ServiceStarted` (Payment, Pickup, ...) just finds it
+already there, so only the true first one publishes `PosSessionOpened`.
+`OrderService` also owns `addItem`/`removeItem`: adding a product always
+resolves its name/price server-side from the `Product` row (never trusts
+a client-supplied price), and re-tapping a product already in the cart
+increments its quantity rather than adding a duplicate line. New routes
+`POST /counters/:id/order/items` and `DELETE /counters/:id/order/
+items/:itemId` on `CounterController`, gated through the same
+`requireCounter` branch-scope check every other counter action uses.
+`CounterService.view()` now returns the current visit's open order
+(`{id, subtotal, items}` or `null`), which is how the counter tablet's
+new cart section gets live data — no separate endpoint, no separate
+polling, it rides the same `useLive` subscription `current`/`upNext`
+already use. `recordPayment` no longer always mints a fresh `Order`: it
+calls `openOrGetOrder` and, only if that order still has zero items
+(every non-catalogue vertical — hospital, salon, temple), falls back to
+build-plan.md Phase 8's exact ad-hoc "Payment" line; otherwise the
+invoice is issued off the cart's real subtotal. Web: the counter tablet
+(`apps/web/src/app/counter/[counterId]/page.tsx`) gained a `CartSection`
+— a tap-to-add product grid grouped by category (no search box, no
+custom-item entry, no quantity stepper — Chapter 38's "no complicated
+staff interfaces") plus a line-item list with per-line remove, shown
+whenever someone's being served, at any stage. On a `PAYMENT`-stage
+counter, the existing amount field now re-syncs to the cart's subtotal
+via a `useEffect` keyed on `order?.subtotal`, instead of starting blank.
+
+**Reason:** `plan.md` 1b's literal instruction — extend `ServiceStarted`'s
+handler to open an order "pre-filled with the token's `serviceTypeId` as
+the first line" — predates the multi-stage engine and assumes pricing
+data `ServiceType` doesn't have (`{queueId, name, durationMinutes}` only,
+no price). Reconciled as: open empty, idempotent per visit rather than
+per stage (a QSR visit's `ServiceStarted` fires three times — Ordering,
+Payment, Pickup — and only the first should open a cart), staff fills it
+from the real catalogue instead of a phantom service-type line.
+
+**Alternatives considered:** gating the cart section to only
+`PAYMENT`-typed counters, matching where the tender controls already
+live. Rejected — the entire premise of Chapter 12 ("a counter already is
+the POS terminal") is that a sale gets rung up wherever it naturally
+happens (typically Ordering in a QSR flow, not Payment), so restricting
+the cart to the checkout stage would have defeated the point.
+
+**Impact:** no schema changes. `recordPayment`'s wire contract is
+unchanged (`{amount, method}`) — the web UI just pre-fills that field
+now, staff can still override it. Every branch that never adds a product
+(every branch before this step existed) behaves byte-for-byte as before:
+empty cart, ad-hoc "Payment" line, same invoice shape.
+
+**Verified:** live API — registered a QSR-template org with two products
+(Burger ₹149, Fries ₹79); confirmed `PosSessionOpened` and an empty
+`order` appeared the instant a token was called to the Ordering counter,
+with no explicit action taken. Added Burger, Fries, tapped Burger again
+(confirmed it incremented to qty 2 rather than duplicating), removed
+Fries — subtotal tracked correctly at every step (149 → 228 → 377 → 298).
+Advanced to Payment and confirmed the *same* order (same id) carried
+across stages, `PosSessionOpened` fired exactly once for the whole visit,
+and the resulting invoice total was the real cart subtotal (298) rather
+than a re-typed number. Separately verified backward compatibility: a
+plain hospital org's billing counter, cart never touched, still produces
+the exact ad-hoc "Payment" line Step 1 built (`productId: null,
+description: 'Payment'`) for whatever amount was typed. Browser check:
+full walkthrough on the actual counter tablet — cart appeared
+automatically on NEXT, tapped Burger and Fries as real tap targets,
+watched the subtotal update live, advanced to the Payment counter and
+confirmed the amount field pre-filled to ₹228 (matching the cart) before
+recording CASH. `test-flow.sh` and full `npm run typecheck` across all
+three workspaces stayed clean throughout.
+
+---
+
+## 2026-09-09 — Commerce data model (`plan.md` Phase 1a — POS foundation, step 1)
+
+**Decision:** All 9 phases of `build-plan.md` are done; this starts on
+`plan.md`'s deferred POS work, scoped to just 1a (`plan.md`'s Phase 1 is
+itself the size of all of `build-plan.md` combined, so it's being taken
+one reviewable step at a time — see the plan file this step ran from).
+Extended the minimal `Order`/`Payment` placeholder from build-plan.md
+Phase 8 into the real commerce model: new `Product` (org-wide catalogue —
+name, category, price, optional `hsnSac`, opt-in `trackStock`),
+`OrderItem` (line items with `staffUserId` attribution, `productId`
+nullable so an ad-hoc line needs no catalogue entry), `Invoice` (sits
+between Order and Payment, per-branch incrementing `number` series via
+new `Branch.nextInvoiceNumber` — same pattern as `Queue.nextNumber`), and
+`StockMovement` (append-only, inert until a later depletion step writes
+to it — same "add the column, wire the behavior later" pattern
+`Queue.nextQueueId` proved across Phases 5→6). `Payment.orderId` (unique,
+1:1) became `Payment.invoiceId` (not unique — an invoice can carry
+multiple payments for split tender later). `Order.amount` (flat total)
+became `Order.subtotal`, recomputed from `items[]`. Two new events,
+`InvoiceIssued`/`PaymentCompleted`, published by `CounterService.
+recordPayment` *alongside* the existing `ServiceCompleted` — auto-advance
+(Phase 6) still reacts to `ServiceCompleted` alone, untouched;
+`PaymentCompleted` exists because `plan.md`'s own Phase 2 (loyalty
+accrual) triggers off it by name. `recordPayment`'s behavior is otherwise
+unchanged: staff still types one amount and taps one tender button; that
+now creates a real `Order`→`OrderItem`→`Invoice`→`Payment` chain instead
+of a flat pair. New org-wide Product catalogue Setup page
+(`/setup/products`, alongside `/setup/staff`), copied structure from the
+Staff setup page.
+
+**Reason:** `plan.md` was written before `build-plan.md` existed and has
+real drift against current reality — it assumes commerce entities don't
+exist yet, references roles renamed in `build-plan.md` Phase 2
+(`BRANCH_MANAGER`/`ORG_ADMIN` → `ADMIN`/`OWNER`), and names a
+`PaymentCompleted` event that Phase 8 had no reason to add yet. This step
+reconciles all of that rather than rebuilding from `plan.md`'s
+now-outdated assumptions.
+
+**Alternatives considered:** building the auto-open-cart trigger (1b) and
+POS terminal UI (1c) in the same pass. Rejected — matches the
+`build-plan.md` rhythm this whole engagement has used: land the data
+model as an additive, behavior-preserving step first, then the riskier
+UI/workflow change as its own reviewable step.
+
+**Impact:** `Payment.invoiceId`/`Order.subtotal` are breaking schema
+changes to a table that already had 2 rows from Phase 8/9 testing — see
+Verified below for how that was migrated losslessly instead of via
+`--force-reset`. No API contract change for `POST /counters/:id/
+record-payment` (still `{amount, method}`); no counter tablet UI change.
+
+**Verified:** `prisma db push` initially blocked on the required
+`Payment.invoiceId` column against 2 existing rows. Rather than
+`--force-reset` (which would have wiped 9 orgs / 543 tokens of
+accumulated dev data over 2 rows), captured the 2 existing Order+Payment
+pairs' data first, pushed with `invoiceId` temporarily nullable
+(`--accept-data-loss`, scoped to only the two now-redundant columns
+`Order.amount`/`Payment.orderId`), backfilled a real `Invoice` for each
+from the captured data, then tightened `invoiceId` back to required and
+pushed clean — zero data loss, all 9 orgs and 543 tokens intact. Live API
+check: registered a QSR-template org, walked a token through Ordering
+into Payment, called `record-payment`, confirmed via direct Prisma query
+that `Order`→`OrderItem`→`Invoice`→`Payment` are all correctly linked,
+and the activity feed shows `InvoiceIssued`, `PaymentCompleted`, and the
+existing `ServiceCompleted` (with `reason: 'PAYMENT_RECORDED'`) all
+firing, with auto-advance into Pickup still working unchanged. Browser
+check: created a product through the new `/setup/products` page,
+confirmed the list and edit-form pre-fill both work. `test-flow.sh` and
+full `npm run typecheck` across all three workspaces stayed clean
+throughout.
+
+---
+
 ## 2026-09-09 — Auto-advance (Phase 6 of `build-plan.md`)
 
 **Decision:** `Token.visitId` is no longer `@unique` — a Visit now owns one

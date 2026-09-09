@@ -104,6 +104,9 @@ export type CheckinSource = (typeof CHECKIN_SOURCES)[number];
 export const PAYMENT_METHODS = ['CASH', 'CARD', 'UPI', 'WALLET'] as const;
 export type PaymentMethod = (typeof PAYMENT_METHODS)[number];
 
+/** Standard Indian GST slabs, for the product catalogue's rate picker. */
+export const GST_RATES = [0, 5, 12, 18, 28] as const;
+
 export const NOTIFICATION_CHANNELS = [
   'PUSH',
   'SMS',

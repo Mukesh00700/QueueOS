@@ -26,6 +26,10 @@ export const QUEUE_EVENTS = [
   'FeedbackSubmitted',
   'TokenTransferred',
   'PriorityChanged',
+  'InvoiceIssued',
+  'PaymentCompleted',
+  'PosSessionOpened',
+  'OrderLineAdded',
 ] as const;
 
 export type QueueEventName = (typeof QUEUE_EVENTS)[number];
