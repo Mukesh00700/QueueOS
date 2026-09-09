@@ -1,0 +1,23 @@
+node_modules/
+dist/
+.next/
+out/
+build/
+
+.env
+.env.*
+!.env.example
+
+*.log
+npm-debug.log*
+
+.DS_Store
+Thumbs.db
+
+*.tsbuildinfo
+.turbo/
+
+.claude/settings.local.json
+
+# Pre-Postgres SQLite leftover — see decision.md, 2026-09-08.
+apps/api/prisma/queueos.db

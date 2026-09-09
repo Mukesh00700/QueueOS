@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "queueos-api",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--workspace", "@queueos/api"],
+      "port": 4000
+    },
+    {
+      "name": "queueos-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--workspace", "@queueos/web"],
+      "port": 3000
+    }
+  ]
+}

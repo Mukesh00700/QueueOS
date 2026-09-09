@@ -1,0 +1,397 @@
+// QueueOS AI — data model
+//
+// Portability note: moved from SQLite to Postgres on 2026-09-08 (see
+// decision.md). Enum-like columns deliberately stay validated Strings rather
+// than native Postgres enums — that promotion is optional per the original
+// design and isn't needed for correctness, since application code already
+// validates them (packages/core/src/enums.ts). JSON payloads stay TEXT rather
+// than a native JSON column, for the same portability-over-cleverness reason.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Tenancy
+// ---------------------------------------------------------------------------
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  /// VerticalId from @queueos/core — drives terminology, journey and theme.
+  vertical  String
+  logoUrl   String?
+  /// Hex accent overriding the vertical default, for white-label tenants.
+  brandColor String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branches   Branch[]
+  staff      StaffUser[]
+  customers  Customer[]
+  visits     Visit[]
+  orders     Order[]
+  events     QueueEvent[]
+}
+
+model Branch {
+  id             String  @id @default(cuid())
+  organizationId String
+  name           String
+  code           String
+  timezone       String  @default("Asia/Kolkata")
+  address        String?
+  /// Per-branch vertical override; falls back to the organization's.
+  vertical       String?
+  openTime       String  @default("09:00")
+  closeTime      String  @default("18:00")
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  queues       Queue[]
+  counters     Counter[]
+  staff        StaffUser[]
+  tokens       Token[]
+  visits       Visit[]
+  orders       Order[]
+  events       QueueEvent[]
+
+  @@unique([organizationId, code])
+  @@index([organizationId])
+}
+
+// ---------------------------------------------------------------------------
+// Queue configuration
+// ---------------------------------------------------------------------------
+
+model Queue {
+  id       String @id @default(cuid())
+  branchId String
+  name        String
+  /// Department / section grouping, e.g. "Cardiology".
+  department  String?
+  /// QueueStatus: OPEN | PAUSED | CLOSED
+  status      String  @default("OPEN")
+  tokenPrefix String  @default("A")
+  /// Next display number to issue; reset by the daily rollover job.
+  nextNumber  Int     @default(1)
+  /// Fallback service estimate before enough history exists, in minutes.
+  baselineServiceMinutes Int @default(8)
+  /// Minutes a called customer has to appear before recall kicks in.
+  recallGraceMinutes     Int @default(3)
+  /// How many positions a no-show is pushed back on a confirmed recall.
+  recallPenaltyPositions Int @default(5)
+  displayOrder Int    @default(0)
+
+  /// StageType from @queueos/core — see queue-flow-design.md §3. Drives
+  /// default terminology/UI once something reads it; unenforced today.
+  stageType String @default("CUSTOM")
+  /// The queue a token advances into once this one's stage completes, if
+  /// configured. Nullable and inert until Phase 6 (auto-advance) reads it —
+  /// see build-plan.md. Deliberately not required to be in the same branch at
+  /// the schema level (Prisma can't express that constraint); enforced in
+  /// QueueService.update() instead.
+  nextQueueId String?
+  /// Whether this stage shows a visible position/ETA queue, or is a quick
+  /// transaction step (typically a PAYMENT stage) with no line to watch.
+  hasVisibleQueue Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branch   Branch    @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  counters Counter[]
+  tokens   Token[]
+  services ServiceType[]
+  events   QueueEvent[]
+
+  nextQueue      Queue?  @relation("QueueStageChain", fields: [nextQueueId], references: [id], onDelete: SetNull)
+  previousQueues Queue[] @relation("QueueStageChain")
+
+  @@index([branchId, status])
+}
+
+model ServiceType {
+  id       String @id @default(cuid())
+  queueId  String
+  name     String
+  /// Expected duration used for mixed-service queues, in minutes.
+  durationMinutes Int @default(8)
+  createdAt DateTime @default(now())
+
+  queue  Queue   @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  tokens Token[]
+
+  @@index([queueId])
+}
+
+model Counter {
+  id       String @id @default(cuid())
+  branchId String
+  queueId  String?
+  name     String
+  /// CounterStatus: IDLE | SERVING | BREAK | CLOSED
+  status   String @default("IDLE")
+  /// Display name of the doctor / stylist / officer currently at this counter.
+  providerName String?
+  /// Staff member signed in to this counter.
+  staffUserId  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  branch Branch     @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  queue  Queue?     @relation(fields: [queueId], references: [id], onDelete: SetNull)
+  staff  StaffUser? @relation(fields: [staffUserId], references: [id], onDelete: SetNull)
+  tokens Token[]
+
+  @@index([branchId])
+  @@index([queueId, status])
+}
+
+// ---------------------------------------------------------------------------
+// People
+// ---------------------------------------------------------------------------
+
+model StaffUser {
+  id             String @id @default(cuid())
+  organizationId String
+  branchId       String?
+  name           String
+  email          String  @unique
+  passwordHash   String
+  /// Role from @queueos/core.
+  role           String
+  active         Boolean @default(true)
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch?      @relation(fields: [branchId], references: [id], onDelete: SetNull)
+  counters     Counter[]
+
+  @@index([organizationId])
+}
+
+model Customer {
+  id             String @id @default(cuid())
+  organizationId String
+  name           String
+  phone          String
+  email          String?
+  /// Accessibility and priority signals captured at check-in.
+  isSeniorCitizen Boolean @default(false)
+  needsAssistance Boolean @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  tokens       Token[]
+  visits       Visit[]
+
+  @@unique([organizationId, phone])
+  @@index([organizationId])
+}
+
+// ---------------------------------------------------------------------------
+// Visits — one customer occasion at a branch. The backbone a customer's
+// stage-tokens hang off; today that's exactly one token each (see
+// queue-flow-design.md §6 for why this exists ahead of the multi-stage work
+// it's actually for).
+// ---------------------------------------------------------------------------
+
+model Visit {
+  id             String @id @default(cuid())
+  organizationId String
+  branchId       String
+  customerId     String?
+
+  /// VisitStatus: OPEN | CLOSED. Closed when a completed stage has no
+  /// nextQueueId to advance into — see AutoAdvanceService.
+  status String @default("OPEN")
+  /// CheckinSource from @queueos/core.
+  source String
+  /// VerticalId at the moment the visit was created — a snapshot, not a live
+  /// join to the branch, so a later vertical change doesn't rewrite history.
+  vertical String
+
+  createdAt DateTime  @default(now())
+  closedAt  DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  customer     Customer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  tokens       Token[]
+  orders       Order[]
+
+  @@index([branchId, status])
+  @@index([customerId])
+}
+
+// ---------------------------------------------------------------------------
+// Minimal commerce — just enough for a PAYMENT-typed stage to be real. Cart
+// UI, GST invoicing, inventory and loyalty stay their own larger follow-on
+// effort per plan.md; this is only what auto-advance needs to gate on an
+// actual payment instead of a staff button. See build-plan.md Phase 8.
+// ---------------------------------------------------------------------------
+
+model Order {
+  id             String @id @default(cuid())
+  organizationId String
+  branchId       String
+  visitId        String
+  amount         Float
+  /// OrderStatus: OPEN | PAID.
+  status         String   @default("OPEN")
+  createdAt      DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  visit        Visit        @relation(fields: [visitId], references: [id], onDelete: Cascade)
+  payment      Payment?
+
+  @@index([visitId])
+  @@index([branchId, createdAt])
+}
+
+model Payment {
+  id      String @id @default(cuid())
+  orderId String @unique
+  amount  Float
+  /// PaymentMethod from @queueos/core.
+  method  String
+  /// Staff user who recorded it. Plain id, no FK — same loose-actor
+  /// convention as QueueEvent.actorId.
+  recordedBy String?
+  recordedAt DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Tokens — the core entity
+// ---------------------------------------------------------------------------
+
+model Token {
+  id       String @id @default(cuid())
+  branchId String
+  queueId  String
+  customerId String?
+  counterId  String?
+  serviceTypeId String?
+  /// One row per stage a visit passes through — a single-stage branch has
+  /// exactly one, a multi-stage branch gets one per stage as auto-advance
+  /// (Phase 6) walks the chain.
+  visitId String
+
+  /// Public short code used in the customer URL and QR. Unguessable.
+  code          String @unique
+  /// The number shown on the board, e.g. 52 in "A52".
+  displayNumber Int
+  /// TokenStatus from @queueos/core.
+  status        String @default("WAITING")
+  /// Priority from @queueos/core.
+  priority      String @default("NORMAL")
+  /// CheckinSource from @queueos/core.
+  source        String @default("WEB")
+
+  /// Sort key within the queue. Priority band first, then join order.
+  /// Recomputed on recall so a returning customer keeps a fair, explainable slot.
+  sortKey Float
+
+  /// Last authoritative ETA, so a reconnecting client sees a value immediately.
+  etaMinutes    Int?
+  etaConfidence Float?
+
+  joinedAt    DateTime  @default(now())
+  calledAt    DateTime?
+  servedAt    DateTime?
+  completedAt DateTime?
+  /// When the current recall attempt expires.
+  recallExpiresAt DateTime?
+  recallAttempts  Int @default(0)
+
+  /// Denormalised service duration in minutes, written on completion. Feeds the
+  /// rolling ETA statistics without re-scanning timestamps on every read.
+  serviceMinutes Float?
+  /// Actual wait from join to called, in minutes. Feeds analytics.
+  waitMinutes    Float?
+
+  notes String?
+
+  branch      Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  queue       Queue        @relation(fields: [queueId], references: [id], onDelete: Cascade)
+  customer    Customer?    @relation(fields: [customerId], references: [id], onDelete: SetNull)
+  counter     Counter?     @relation(fields: [counterId], references: [id], onDelete: SetNull)
+  serviceType ServiceType? @relation(fields: [serviceTypeId], references: [id], onDelete: SetNull)
+  visit         Visit          @relation(fields: [visitId], references: [id], onDelete: Cascade)
+  notifications Notification[]
+  feedback      Feedback?
+  events        QueueEvent[]
+
+  @@index([queueId, status, sortKey])
+  @@index([branchId, joinedAt])
+  @@index([visitId])
+}
+
+model Notification {
+  id      String @id @default(cuid())
+  tokenId String
+  /// NotificationChannel from @queueos/core.
+  channel String
+  /// Threshold that triggered it, e.g. 15 for the 15-minute warning. Null for ad-hoc.
+  thresholdMinutes Int?
+  title   String
+  body    String
+  sentAt  DateTime @default(now())
+  /// Delivery outcome. No real gateway is wired up yet, so this is SIMULATED.
+  status  String   @default("SIMULATED")
+
+  token Token @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([tokenId])
+  @@unique([tokenId, thresholdMinutes])
+}
+
+model Feedback {
+  id      String @id @default(cuid())
+  tokenId String @unique
+  rating  Int
+  comment String?
+  createdAt DateTime @default(now())
+
+  token Token @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------------
+// Event log — append-only, drives realtime fan-out, analytics and audit
+// ---------------------------------------------------------------------------
+
+model QueueEvent {
+  id             String @id @default(cuid())
+  organizationId String
+  branchId       String
+  queueId        String?
+  tokenId        String?
+  /// QueueEventName from @queueos/core.
+  name           String
+  actorId        String?
+  /// JSON-encoded payload. TEXT rather than a JSON column to stay portable.
+  payload        String @default("{}")
+  occurredAt     DateTime @default(now())
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  queue        Queue?       @relation(fields: [queueId], references: [id], onDelete: SetNull)
+  token        Token?       @relation(fields: [tokenId], references: [id], onDelete: SetNull)
+
+  @@index([branchId, occurredAt])
+  @@index([queueId, occurredAt])
+  @@index([name, occurredAt])
+}

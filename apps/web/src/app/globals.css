@@ -1,0 +1,164 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens.
+ *
+ * Three layers, in order:
+ *   1. Semantic variables (--surface, --card, --line...) — swapped wholesale by
+ *      the .dark class. Nothing in a component ever references a raw hex.
+ *   2. --accent / --glow / --tint — set per-vertical at runtime by ThemeProvider.
+ *      This is what makes hospital blue, temple gold and QSR orange the same
+ *      components rather than forked ones.
+ *   3. @theme inline — exposes the above to Tailwind as utility classes.
+ */
+
+:root {
+  --surface: #f8fafc;
+  --surface-raised: #ffffff;
+  --card: #ffffff;
+  --line: #e5e7eb;
+  --line-strong: #d1d5db;
+
+  --fg: #111827;
+  --fg-muted: #6b7280;
+  --fg-subtle: #9ca3af;
+
+  --success: #16a34a;
+  --warning: #f59e0b;
+  --danger: #dc2626;
+  --ai: #7c3aed;
+
+  --accent: #2563eb;
+  --accent-fg: #ffffff;
+  --glow: rgba(37, 99, 235, 0.28);
+  --tint: 37 99 235;
+
+  --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.04), 0 1px 3px rgba(16, 24, 40, 0.06);
+  --shadow-raised: 0 4px 12px rgba(16, 24, 40, 0.06), 0 12px 32px rgba(16, 24, 40, 0.08);
+}
+
+.dark {
+  --surface: #0b1220;
+  --surface-raised: #0f172a;
+  --card: #111827;
+  --line: #1f2937;
+  --line-strong: #334155;
+
+  --fg: #f9fafb;
+  --fg-muted: #94a3b8;
+  --fg-subtle: #64748b;
+
+  --success: #22c55e;
+  --warning: #fbbf24;
+  --danger: #ef4444;
+  --ai: #8b5cf6;
+
+  --accent: #3b82f6;
+  --accent-fg: #ffffff;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-raised: 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+@theme inline {
+  --color-surface: var(--surface);
+  --color-raised: var(--surface-raised);
+  --color-card: var(--card);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+
+  --color-fg: var(--fg);
+  --color-muted: var(--fg-muted);
+  --color-subtle: var(--fg-subtle);
+
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-ai: var(--ai);
+
+  --font-sans: Inter, ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --radius-card: 16px;
+}
+
+* {
+  border-color: var(--line);
+}
+
+html {
+  color-scheme: light;
+}
+
+html.dark {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Numbers are the primary content of this product — token numbers, ETAs,
+   queue depths. Tabular figures stop them jittering as they count. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
+/* The live pulse next to anything driven by the socket feed. */
+@keyframes queueos-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.45;
+    transform: scale(0.82);
+  }
+}
+
+.live-dot {
+  animation: queueos-pulse 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .live-dot {
+    animation: none;
+  }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Ambient accent glow behind hero numerals. */
+.accent-glow {
+  box-shadow: 0 0 60px -12px var(--glow);
+}
+
+::selection {
+  background: var(--accent);
+  color: var(--accent-fg);
+}
+
+/* Scrollbars, so dense operator panels don't look like a default web page. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--line-strong);
+  border-radius: 999px;
+  border: 3px solid var(--surface);
+}

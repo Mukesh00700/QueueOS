@@ -1,0 +1,28 @@
+{
+  "name": "queueos",
+  "private": true,
+  "version": "0.1.0",
+  "description": "QueueOS AI - Universal Intelligent Queue Management Operating System",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build:core": "npm run build --workspace @queueos/core",
+    "dev": "npm run build:core && concurrently -n api,web -c cyan,magenta \"npm run dev --workspace @queueos/api\" \"npm run dev --workspace @queueos/web\"",
+    "dev:api": "npm run dev --workspace @queueos/api",
+    "dev:web": "npm run dev --workspace @queueos/web",
+    "db:push": "npm run db:push --workspace @queueos/api",
+    "db:seed": "npm run db:seed --workspace @queueos/api",
+    "db:reset": "npm run db:reset --workspace @queueos/api",
+    "setup": "npm install && npm run build:core && npm run db:push && npm run db:seed",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
