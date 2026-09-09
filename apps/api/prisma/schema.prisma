@@ -323,6 +323,12 @@ model OrderItem {
   order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
 
+  /// Makes "add this product again" an atomic upsert instead of a
+  /// read-then-write race — two rapid taps on the same product could
+  /// otherwise create two line rows instead of incrementing one. NULL
+  /// productId (an ad-hoc line) is exempt: Postgres treats every NULL as
+  /// distinct, so this never constrains ad-hoc lines against each other.
+  @@unique([orderId, productId])
   @@index([orderId])
   @@index([productId])
 }

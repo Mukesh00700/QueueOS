@@ -362,10 +362,17 @@ export class CounterService {
 
     const invoice = await this.prisma.$transaction(async (tx) => {
       const orderId = openOrder.id;
-      let subtotal = openOrder.subtotal;
-      let taxAmount = openOrder.taxAmount;
+      // Re-read fresh inside the transaction, not from the snapshot fetched
+      // before it opened — a cart line added between that fetch and here
+      // must not be silently dropped from (or missing from) the invoice.
+      const fresh = await tx.order.findUniqueOrThrow({
+        where: { id: orderId },
+        include: { items: { select: { id: true } } },
+      });
+      let subtotal = fresh.subtotal;
+      let taxAmount = fresh.taxAmount;
 
-      if (openOrder.items.length === 0) {
+      if (fresh.items.length === 0) {
         // The flat "type an amount" fallback — no product, no rate, no tax.
         await tx.orderItem.create({
           data: {
@@ -379,6 +386,16 @@ export class CounterService {
         });
         subtotal = dto.amount;
         taxAmount = 0;
+      } else {
+        // A real cart exists — the amount tendered must at least cover it.
+        // Over-tendering (change due) is fine; silently under-recording a
+        // sale is not.
+        const total = subtotal + taxAmount;
+        if (dto.amount < total - 0.01) {
+          throw new BadRequestException(
+            `Amount is less than the cart total of ${total.toFixed(2)}`,
+          );
+        }
       }
 
       await tx.order.update({ where: { id: orderId }, data: { subtotal, taxAmount, status: 'PAID' } });

@@ -167,6 +167,77 @@ typecheck` across all three workspaces stayed clean throughout.
 
 ---
 
+## 2026-09-09 — Security and bug audit
+
+**Decision:** A full pass over the codebase for bugs and security issues,
+concentrated on the newest code (the POS work is the highest-risk recent
+addition) with a lighter confirmation pass over the established auth/
+tenant-isolation surface. Four real issues found and fixed; the rest of
+the surface checked out clean.
+
+**Fixed:**
+1. **Race condition, duplicate cart lines** — `OrderService.addItem` did
+   a find-then-write (check for an existing line, then create or update)
+   instead of an atomic operation; two rapid taps on the same product
+   could create two line rows instead of incrementing one. Fixed with a
+   new `@@unique([orderId, productId])` constraint (NULL `productId` —
+   ad-hoc lines — stays exempt, since Postgres treats every NULL as
+   distinct) and `prisma.orderItem.upsert()` in place of the read-then-
+   write. Verified by firing 5 truly concurrent adds of the same product:
+   before the fix this was untested and exposed; after, it correctly
+   produces one line at quantity 5.
+2. **Stale data feeding the issued invoice** — `CounterService.
+   recordPayment` computed the invoice from an `Order` snapshot fetched
+   *before* its `$transaction` opened. A cart line added in that window
+   (a staff member still ringing up items while payment is being
+   recorded) would have been silently dropped from the invoice. Fixed by
+   re-reading the order fresh from inside the transaction instead of
+   trusting the pre-transaction snapshot.
+3. **No validation that the tendered amount covers the cart** — `dto.
+   amount` (what staff types/taps as the payment) was never checked
+   against the actual invoice total when a real cart existed; any
+   positive number was accepted and recorded as a completed payment
+   regardless of what was actually owed — a real under-recording (or
+   fraud) gap, not just an edge case. Fixed: reject with a clear message
+   when `amount < total - 0.01` (a small epsilon for float rounding),
+   while still allowing *over*-tendering, since a cash payment
+   legitimately exceeding the total (change due) is normal and this
+   product deliberately doesn't build change-calculation. Verified both
+   the rejection and the legitimate-overpayment path.
+4. **Frontend: stale tender amount after emptying the cart** — the
+   payment-amount input only re-synced when `order.total > 0`, so
+   removing the last cart item left the field showing the old total
+   instead of clearing — a staff member could submit a payment amount
+   that no longer matched the actual (now smaller or empty) cart. Fixed
+   the sync effect to clear back to empty whenever the total is zero.
+   Verified in the browser: added a product (field filled to match),
+   removed it (field correctly went back to empty).
+
+**Reviewed and found solid, no changes needed:** CORS restricted to the
+configured `WEB_ORIGIN` (never a wildcard); the auth guard fails closed
+by default (every controller requires auth and an explicit `@MinRole`
+unless it opts out with `@Public()` — confirmed by auditing every
+controller's decorators, not just spot-checking); password hashing is
+scrypt with a random salt per password and a timing-safe comparison;
+every single mutating endpoint validates its body through the `ZodBody`
+pipe (confirmed via a repo-wide search for `@Body(` — zero instances
+without a schema); no raw SQL anywhere in application code; no secrets
+or non-`NEXT_PUBLIC_` env vars reachable from the client bundle; the
+newest Product/Order endpoints resolve every tenant-scoped id (`visitId`,
+`organizationId`) from already-authenticated, already-scoped server-side
+context rather than trusting a client-supplied id for anything sensitive
+— no IDOR found. Cross-queue token transfer and priority-change (an
+older, higher-risk-looking surface — moving a token between queues) were
+re-checked and correctly require manage-access on both the source and
+target queue, with cross-branch transfers explicitly blocked.
+
+**Impact:** additive schema-only change (the new unique constraint —
+confirmed zero existing duplicate rows before adding it, so no data was
+affected). No API contract changes. `test-flow.sh` and full `npm run
+typecheck` across all three workspaces stayed clean throughout.
+
+---
+
 ## 2026-09-09 — Stopping POS depth after `plan.md` 1a–1d
 
 **Decision:** POS work stops here. `plan.md` Phase 1e (shift close/cash

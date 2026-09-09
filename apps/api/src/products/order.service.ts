@@ -42,7 +42,9 @@ export class OrderService {
   /**
    * Adds (or, for a product already in the cart, increments) a line.
    * `productId` is always resolved server-side for its name/price — a
-   * counter action never trusts a client-supplied price.
+   * counter action never trusts a client-supplied price. The upsert on
+   * `(orderId, productId)` makes "add this product again" atomic — two
+   * rapid taps can never create two rows for the same product.
    */
   async addItem(visitId: string, productId: string, quantity: number, actorId: string | null) {
     const order = await this.currentOpenOrder(visitId);
@@ -53,28 +55,24 @@ export class OrderService {
       throw new NotFoundException('Product not found');
     }
 
-    const existingLine = order.items.find((i) => i.productId === productId);
-    if (existingLine) {
-      const newQuantity = existingLine.quantity + quantity;
-      await this.prisma.orderItem.update({
-        where: { id: existingLine.id },
-        data: { quantity: newQuantity, lineTotal: newQuantity * product.price },
-      });
-    } else {
-      await this.prisma.orderItem.create({
-        data: {
-          orderId: order.id,
-          productId: product.id,
-          description: product.name,
-          quantity,
-          unitPrice: product.price,
-          lineTotal: product.price * quantity,
-          // Snapshotted at add-time — see the schema comment on this column.
-          gstRate: product.gstRate,
-          staffUserId: actorId,
-        },
-      });
-    }
+    await this.prisma.orderItem.upsert({
+      where: { orderId_productId: { orderId: order.id, productId } },
+      create: {
+        orderId: order.id,
+        productId: product.id,
+        description: product.name,
+        quantity,
+        unitPrice: product.price,
+        lineTotal: product.price * quantity,
+        // Snapshotted at add-time — see the schema comment on this column.
+        gstRate: product.gstRate,
+        staffUserId: actorId,
+      },
+      update: {
+        quantity: { increment: quantity },
+        lineTotal: { increment: product.price * quantity },
+      },
+    });
 
     const updated = await this.recomputeTotals(order.id);
 

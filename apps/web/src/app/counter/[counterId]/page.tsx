@@ -113,9 +113,11 @@ function CounterConsole({
 
   // The tender amount tracks the cart's tax-inclusive total as it's built
   // up — still manually editable after, e.g. for a vertical with no
-  // catalogue lines.
+  // catalogue lines. Must also clear back to empty if the cart empties out
+  // (e.g. the last item removed) — otherwise a stale total from a since-
+  // removed item could get submitted as the tendered amount.
   useEffect(() => {
-    if (order && order.total > 0) setPaymentAmount(String(order.total));
+    setPaymentAmount(order && order.total > 0 ? String(order.total) : '');
   }, [order?.total]);
 
   async function run(action: 'next' | 'recall' | 'skip' | 'complete') {
