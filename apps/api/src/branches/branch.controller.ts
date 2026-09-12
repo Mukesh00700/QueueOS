@@ -7,6 +7,7 @@ import { provisionFlow } from '../queues/flow-provisioning';
 import { EventBusService } from '../events/event-bus.service';
 import { InsightsService } from '../insights/insights.service';
 import { CounterService } from '../counters/counter.service';
+import { formatDisplayCode } from '../queues/queue.util';
 import { MinRole, Public, type AuthedRequest } from '../auth/auth.guard';
 import type { JwtPayload } from '../auth/auth.service';
 import { ZodBody } from '../common/zod.pipe';
@@ -192,15 +193,41 @@ export class BranchController {
   @Get('branches/:id/overview')
   async overview(@Param('id') id: string, @Req() req: AuthedRequest) {
     await this.requireBranchScope(id, req.user!);
-    const [stats, queues, timeline, activity, insights, forecast, counters] = await Promise.all([
+    const [stats, queues, timeline, activity, insights, forecast, rawCounters] = await Promise.all([
       this.queues.branchStats(id),
       this.queues.listForBranch(id),
       this.queues.hourlyLoad(id),
       this.events.recent(id, 20),
       this.insights.forBranch(id),
       this.insights.forecast(id),
-      this.prisma.counter.findMany({ where: { branchId: id }, orderBy: { name: 'asc' } }),
+      this.prisma.counter.findMany({
+        where: { branchId: id },
+        include: { queue: { select: { id: true, name: true, tokenPrefix: true } } },
+        orderBy: { name: 'asc' },
+      }),
     ]);
+
+    // Who's actually being served right now at each counter — so a NEXT/
+    // COMPLETE press on the counter tablet shows up here too, not just a
+    // status dot. One query for every counter rather than N.
+    const servingTokens = await this.prisma.token.findMany({
+      where: { counterId: { in: rawCounters.map((c) => c.id) }, status: { in: ['SERVING', 'CALLED'] } },
+      include: { customer: true },
+    });
+    const currentByCounter = new Map(servingTokens.map((t) => [t.counterId, t]));
+
+    const counters = rawCounters.map((c) => {
+      const current = currentByCounter.get(c.id);
+      return {
+        ...c,
+        currentToken: current
+          ? {
+              code: formatDisplayCode(c.queue?.tokenPrefix ?? 'A', current.displayNumber),
+              customerName: current.customer?.name ?? null,
+            }
+          : null,
+      };
+    });
 
     return { stats, queues, timeline, activity, insights, forecast, counters };
   }

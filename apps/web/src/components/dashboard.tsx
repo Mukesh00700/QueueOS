@@ -296,10 +296,19 @@ export function InsightList({ insights }: { insights: Insight[] }) {
 
 // --- Counters ----------------------------------------------------------------
 
+const COUNTER_DOT: Record<string, string> = {
+  SERVING: 'bg-success live-dot',
+  BREAK: 'bg-warning',
+  CLOSED: 'bg-danger',
+  IDLE: 'bg-subtle',
+};
+
 export function CounterStrip({ counters, t }: { counters: CounterRow[]; t: Terminology }) {
+  const servingCount = counters.filter((c) => c.status === 'SERVING').length;
+
   return (
     <Card>
-      <CardHeader title={t.counterPlural} subtitle={`${counters.filter((c) => c.status === 'OPEN').length} open`} icon={<Monitor size={16} />} />
+      <CardHeader title={t.counterPlural} subtitle={`${servingCount} serving`} icon={<Monitor size={16} />} />
       <div className="grid gap-2 px-5 pb-5 sm:grid-cols-2">
         {counters.map((counter) => (
           <Link
@@ -307,16 +316,13 @@ export function CounterStrip({ counters, t }: { counters: CounterRow[]; t: Termi
             href={`/counter/${counter.id}`}
             className="flex items-center gap-3 rounded-xl border border-line bg-raised px-3 py-2.5 transition-colors hover:border-line-strong"
           >
-            <span
-              className={cn(
-                'h-2 w-2 shrink-0 rounded-full',
-                counter.status === 'OPEN' ? 'bg-success' : counter.status === 'BREAK' ? 'bg-warning' : 'bg-subtle',
-              )}
-            />
+            <span className={cn('h-2 w-2 shrink-0 rounded-full', COUNTER_DOT[counter.status] ?? 'bg-subtle')} />
             <div className="min-w-0 flex-1">
               <p className="truncate text-sm font-medium">{counter.name}</p>
               <p className="truncate text-[11px] text-muted">
-                {counter.providerName ?? `No ${t.provider.toLowerCase()} assigned`}
+                {counter.currentToken
+                  ? `Serving ${counter.currentToken.code}${counter.currentToken.customerName ? ` · ${counter.currentToken.customerName}` : ''}`
+                  : (counter.providerName ?? `No ${t.provider.toLowerCase()} assigned`)}
               </p>
             </div>
             <span className="shrink-0 text-[11px] text-subtle">{counter.queue?.name ?? '—'}</span>

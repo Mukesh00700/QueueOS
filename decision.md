@@ -22,6 +22,54 @@ approach over a plausible alternative, does.
 
 ---
 
+## 2026-09-10 — Counter tablet polish + dashboard reflecting live counter state
+
+**Decision:** Three fixes, all found live rather than by inspection alone.
+(1) `BranchController.overview()` (`apps/api/src/branches/branch.controller.ts`)
+now includes each counter's `queue` relation and a `currentToken` (code +
+customer name) resolved from whichever token is `SERVING`/`CALLED` at that
+counter — one extra query for all counters, not N. (2) `CounterStrip`
+(`apps/web/src/components/dashboard.tsx`) was checking
+`counter.status === 'OPEN'`, a status that has never existed on `Counter`
+(`COUNTER_STATUSES` is `IDLE|SERVING|BREAK|CLOSED`) — the live dot never lit
+and the header count was always "0 open". Replaced with a real
+status→tone/label map and now shows "N serving" plus who's being served.
+(3) The counter tablet (`apps/web/src/app/counter/[counterId]/page.tsx`)
+had the same status-Pill bug (only recognized SERVING), showed no positive
+feedback on a successful action (errors only), and had no motion anywhere.
+Added a status tone/label map, a transient success message alongside the
+existing error path, and framer-motion transitions on the "Now Serving"
+block, the cart lines, and the up-next list.
+
+**Bug found and fixed during verification, not requested but discovered
+live:** the first version wrapped the "Now Serving" code and customer name
+in *separate* animated elements, so a fast transition could show a stale
+code next to the new name for a frame — merged into one animated block so
+they always transition as a unit. Then, testing that with back-to-back
+Next-guest presses (an immediate `onChange()` refetch plus a
+socket-debounced refetch landing moments later — see `use-live.ts`, which
+has no request-sequencing guard), `AnimatePresence mode="wait"` got stuck
+holding the hero blank: the key changed again before its exit animation
+finished, which is a known `mode="wait"` failure mode. Dropped `mode="wait"`
+in favour of a plain crossfade, which has no sequencing to get stuck in.
+Confirmed fixed by repeating the same rapid-click sequence that broke it.
+
+**Reason:** Direct user request — "the ui looks bad, the changes made
+there should also reflect it dashboard as well, and make the counter page
+more interactive." The dashboard piece required real backend data (no
+current-token info existed anywhere before this), not just a frontend fix.
+
+**Impact:** `apps/api/src/branches/branch.controller.ts` (`overview()`
+query + response shape), `apps/web/src/lib/api.ts` (`CounterRow.currentToken`),
+`apps/web/src/components/dashboard.tsx` (`CounterStrip`),
+`apps/web/src/app/counter/[counterId]/page.tsx`. Verified with
+`npm run typecheck` (api + web), `apps/api/test-flow.sh` (unmodified, still
+passing), and live browser testing on the seeded Burger Junction org —
+including deliberately hammering the Next-guest button to reproduce and
+then confirm the fix for the `AnimatePresence` bug above.
+
+---
+
 ## 2026-09-09 — Payment stage + minimal commerce (Phase 8 of `build-plan.md`)
 
 **Decision:** Two new models, deliberately minimal — no cart, no line

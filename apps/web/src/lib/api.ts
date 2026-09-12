@@ -131,6 +131,7 @@ export interface CounterRow {
   queueId: string | null;
   staffUserId: string | null;
   queue?: { id: string; name: string } | null;
+  currentToken?: { code: string; customerName: string | null } | null;
 }
 
 export interface MyCounter {
