@@ -22,6 +22,223 @@ approach over a plausible alternative, does.
 
 ---
 
+## 2026-09-19 — Real Web Push notifications (the SIMULATED gap closed)
+
+**Decision:** `QueueService.maybeNotify` has known exactly when and what
+to tell a waiting customer since Phase 6 — it just wrote a `Notification`
+row with `status: 'SIMULATED'` and logged it, nothing was ever sent. Wired
+real delivery in, no paid provider: Web Push rides free through the
+browser vendor's own push service, authenticated by this app's own VAPID
+key pair (`npx web-push generate-vapid-keys`, stored in `apps/api/.env`)
+rather than an account with a third party. New `PushSubscription` model
+(one row per browser that tapped "Notify me," keyed by `endpoint` so
+re-subscribing the same browser updates in place, `onDelete: Cascade`
+from `Token` — a subscription only means anything for that one wait).
+New `PushService` wraps the `web-push` library (real cryptographic
+weight — ECDH, AES-GCM, VAPID JWT signing — not something to hand-roll)
+with `subscribe()` and `send()`; `send()` returns whether *any*
+subscription actually delivered, and `maybeNotify` now flips the
+`Notification` row to `'SENT'` only on real success — `'SIMULATED'` still
+means exactly what it always did, "computed, but nobody was listening,"
+not "not built yet." A 404/410 from the push service (browser discarded
+the subscription — uninstalled, expired, permission revoked) deletes it
+rather than retrying forever. New `POST /t/:code/push-subscribe`
+(`@Public()`, same tier as every other customer action). Frontend: a
+static `public/sw.js` service worker (push receiver only — no caching, no
+offline support, this isn't a PWA), a "Notify me" card on `/t/[code]`
+with real per-state handling (unsupported browser → nothing shown at all,
+not a dead-end; blocked permission → one clear message, no button
+pretending to still work; mid-request → spinner; failure → an honest
+fallback telling them to keep the page open instead). VAPID public key
+shipped via `NEXT_PUBLIC_VAPID_PUBLIC_KEY`, matching how
+`NEXT_PUBLIC_API_URL` already works — no new "give me the public key"
+endpoint needed for a value that never changes at runtime.
+
+**Reason:** Talked through the options with the project owner first —
+SMS/WhatsApp need a paid provider (Twilio et al.), push doesn't. Chosen
+as the highest-leverage next feature precisely because the trigger logic
+already existed; this closed the gap rather than building something new.
+
+**Alternatives considered:** hand-rolling the push crypto — rejected,
+real algorithmic weight matching an established library's exact job,
+not a place to reinvent anything.
+
+**Impact:** `apps/api/prisma/schema.prisma` (`PushSubscription`),
+`apps/api/src/notifications/push.service.ts` (new),
+`apps/api/src/queues/queue.service.ts` (`maybeNotify` now sends for
+real), `apps/api/src/tokens/{token.service,token.controller,token.dto}.ts`
+(subscribe endpoint), `apps/api/src/app.module.ts`, `apps/api/.env` /
+`.env.example` (VAPID_*), `apps/web/public/sw.js` (new),
+`apps/web/src/app/t/[code]/page.tsx` (NotifyMeCard),
+`apps/web/src/lib/api.ts`, `apps/web/.env.local`
+(NEXT_PUBLIC_VAPID_PUBLIC_KEY). One new dependency each side (`web-push`
+api-side; nothing new web-side, the Push API is native browser
+platform). Verified thoroughly given this touches real external
+delivery and browser permissions: `npm run typecheck` and
+`test-flow.sh` clean on both; the subscribe endpoint tested directly
+against the running API with a real check-in and confirmed the
+resulting `PushSubscription` row persisted correctly; the send path's
+error handling verified by calling `webpush.sendNotification` directly
+against that subscription and confirming a malformed-key failure is
+caught cleanly, matching exactly what `PushService.send`'s try/catch
+does per subscription; the frontend UI verified live end-to-end through
+every reachable state (idle → enabling → denied → error), including
+finding and fixing a real overlap bug (a "blocked" warning could render
+next to a still-clickable "Enable" button). The one thing not
+verifiable from here: an actual OS notification appearing, since this
+sandboxed test browser restricts service-worker registration in a way
+a real browser doesn't — flagged clearly rather than claimed as
+confirmed. Also surfaced and documented for later: Web Push requires a
+secure context, and browsers only exempt `localhost` from that, not a
+LAN IP — so the QR/check-in flow works fine over a phone's LAN HTTP
+connection once the firewall's sorted, but push specifically will not,
+until there's a real HTTPS origin (a tunnel, or the eventual real
+deployment).
+
+---
+
+## 2026-09-19 — Real check-in QR code, printable
+
+**Decision:** Every earlier mention of "the QR code" this whole
+engagement was aspirational — the "Check-in" button just linked straight
+to the check-in form; nothing actually rendered a scannable code. Added
+one. New public page `/checkin/:branchId/qr` (no auth, same reasoning as
+`/checkin` and `/display` — whoever's pointing a phone camera at it was
+never going to be logged in): fetches the branch's public check-in info,
+renders a QR (via `qrcode.react`, one new zero-dependency package) that
+encodes `window.location.origin + /checkin/:branchId` — computed
+client-side at render time, never a hardcoded/API origin, since it has
+to resolve to wherever the scanning phone can actually reach this app.
+A "Print" button (`window.print()`) with Tailwind `print:` variants
+hiding the nav chrome, so the printed page is just the org/branch name
+and the code — meant to be taped up at the venue, not read on a
+dashboard. New "QR code" button on the branch dashboard header, next to
+the existing Check-in/Display buttons — deliberately not folded into
+the existing Check-in button, which is a different, still-needed thing
+(staff filling the form in themselves for a phone-in customer).
+
+**Reason:** Direct request — build the thing that's been referenced
+conceptually all session but never existed.
+
+**Alternatives considered:** hand-rolling QR encoding — rejected
+outright, it's real algorithmic weight (Reed-Solomon error correction,
+mode selection) that a one-line library call already solves correctly;
+not something to reinvent for a first pass.
+
+**Impact:** `apps/web/package.json` (`qrcode.react` added), new
+`apps/web/src/app/checkin/[branchId]/qr/page.tsx`,
+`apps/web/src/app/dashboard/[branchId]/page.tsx` (new header button).
+No backend changes — reuses the already-public `checkin-info` endpoint.
+Verified live: loaded the page, confirmed it renders the branch's real
+name and a correctly-scannable code (crisp black-on-white modules,
+correct URL printed underneath for a human to double check against).
+`npm run typecheck` clean.
+
+---
+
+## 2026-09-15 — Counters had no sidebar nav entry (Owner/Admin couldn't find them)
+
+**Decision:** Turns out the feature requested — Owner/Admin clicking
+through from the dashboard to a live queue or counter, seeing exactly
+what a staff member would — already existed end to end (`QueueGrid`
+cards already linked to `/queues/:id`, `CounterStrip` rows already
+linked to `/counter/:id`, verified both live). The actual gap: the
+counters section had zero entry in `AppShell`'s sidebar nav — unlike
+queues (`vertical.terminology.queuePlural`, linking to `#queues`),
+counters were only reachable by scrolling to the very bottom of a long
+dashboard, past KPIs, queues, AI panel, activity feed. Its wrapper div
+was also `id="settings"` — a leftover/mismatched anchor nothing actually
+pointed at. Added a sidebar item (`vertical.terminology.counterPlural`
+— "Pickup Points" for this vertical — with a badge count, same shape as
+the queues entry) linking to `#counters`, and renamed the anchor to
+match.
+
+**Reason:** The project owner asked for this as if it didn't exist;
+checking live proved the mechanism was already there, just
+undiscoverable — no link anywhere led to it except scrolling.
+
+**Impact:** `apps/web/src/components/app-shell.tsx` (new `counterCount`
+prop, new nav item), `apps/web/src/app/dashboard/[branchId]/page.tsx`
+(passes the count, `id="settings"` → `id="counters"`). Verified live:
+the "Pickup Points" sidebar item now appears with the right badge count
+and jumps straight to the section on click.
+
+---
+
+## 2026-09-15 — Branch-scoped products, delete for queues/counters, floor-staff transfer
+
+**Decision:** Four related fixes, each found by using the product rather
+than reading the code.
+
+1. **Per-branch product availability.** `Product` gained an optional
+   many-to-many relation to `Branch` (empty = every branch, the default —
+   every existing product is unaffected). Setup → Products gained an
+   "Available at" picker (only rendered once an org has 2+ branches).
+   Enforced twice: the counter tablet's catalogue is now resolved
+   server-side per-branch (`ProductService.listForBranch`), and
+   `OrderService.addItem` independently rejects adding a product that
+   isn't available at the order's branch — not just hidden in the UI.
+2. **Delete for queues and counters.** Counters are safe to hard-delete —
+   `Token.counterId` is `SetNull`, so history just loses its "which
+   counter" pointer. Queues are not: `Token.queueId` cascades, so
+   `QueueService.delete` refuses outright if a single token has ever
+   passed through it, pointing the admin at Status → Closed instead.
+   Verified live: deleting a used queue is correctly refused with that
+   message; deleting an unused one correctly clears the dangling
+   `nextQueueId` on whichever queue pointed at it (schema-level
+   `SetNull`, no app code needed).
+3. **`request()` silently broken on every DELETE.** Found while testing
+   the above: the shared frontend fetch helper unconditionally called
+   `res.json()` on success, which throws on the empty body every delete
+   endpoint returns. This wasn't new — `deleteServiceType` had the exact
+   same latent bug since it was written, silently swallowed because its
+   caller's `catch` block masked it as "could not remove service" while
+   the removal had actually already succeeded server-side. Fixed once at
+   the shared function: read the body as text first, parse only if
+   non-empty.
+4. **Floor staff can now transfer a customer between queues.** Previously
+   Admin-only. Reasoned through with the project owner: "wrong line,
+   move them" is routine triage a receptionist handles constantly, not a
+   decision that needs a manager — unlike priority override (jumping
+   someone ahead of everyone else waiting), which stays Admin-gated on
+   purpose, since that has a fairness dimension worth a manager's
+   sign-off. Lowered `POST /tokens/:id/transfer` to `COUNTER_STAFF`;
+   `TokenService.transfer`'s own same-branch scoping (`requireManageAccess`)
+   still applies independently, so this doesn't widen reach beyond one
+   branch. Also added a "Transfer" link on the counter tablet's header
+   pointing at `/queues/:id` — floor staff previously had zero UI path to
+   that screen even though nothing blocked them from using its actions in
+   principle. That surfaced a second, coupled gate: the sibling-queue list
+   the transfer dropdown depends on (`GET /branches/:id/queue-config`) was
+   still `@MinRole('ADMIN')`, so the dropdown rendered empty for anyone
+   below Admin even after the action itself was reachable — lowered that
+   too (nothing sensitive in a raw queue-config list — no customer or
+   financial data, just operational settings, still branch-scoped).
+
+**Reason:** All four came directly from the project owner using the app
+and asking "why can't I..." — not from a planned backlog.
+
+**Impact:** `apps/api/prisma/schema.prisma` (`Product.branches` relation),
+`apps/api/src/products/{product,order}.service.ts`,
+`apps/api/src/counters/counter.{service,controller}.ts`,
+`apps/api/src/queues/queue.{service,controller}.ts`,
+`apps/api/src/branches/branch.controller.ts` (`queue-config` role),
+`apps/api/src/tokens/token-admin.controller.ts` (split `@MinRole` per
+action), `apps/web/src/lib/api.ts` (the `request()` fix — affects every
+DELETE call in the app, not just the new ones),
+`apps/web/src/app/setup/products/page.tsx`,
+`apps/web/src/app/setup/branches/[branchId]/{queues,counters}/page.tsx`,
+`apps/web/src/app/counter/[counterId]/page.tsx`. Verified live throughout
+rather than just by type-checking: created a second branch and a
+branch-restricted product and confirmed it was invisible/visible on the
+right counters; deleted a counter and a queue (one blocked, one allowed)
+and watched the dangling reference clear itself; signed in as an actual
+`COUNTER_STAFF`-rank seeded account and performed a real transfer
+end-to-end through the newly-added UI path. `npm run typecheck` (api +
+web) and `apps/api/test-flow.sh` stayed clean throughout.
+
+---
+
 ## 2026-09-10 — Counter tablet polish + dashboard reflecting live counter state
 
 **Decision:** Three fixes, all found live rather than by inspection alone.

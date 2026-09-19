@@ -1,17 +1,19 @@
 'use client';
 
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import {
   Activity,
   ArrowRight,
   LayoutDashboard,
+  LogOut,
   Monitor,
   QrCode,
   Sparkles,
 } from 'lucide-react';
 import { getVertical } from '@queueos/core';
-import { api, ApiError, type BranchSummary } from '@/lib/api';
+import { api, ApiError, setStoredToken, type BranchSummary } from '@/lib/api';
 import { Card, Pill, Skeleton } from '@/components/ui';
 
 /**
@@ -24,6 +26,7 @@ import { Card, Pill, Skeleton } from '@/components/ui';
  * manager sees only their own branches.
  */
 export default function LauncherPage() {
+  const router = useRouter();
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
   const [branches, setBranches] = useState<BranchSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -57,11 +60,16 @@ export default function LauncherPage() {
       });
   }, []);
 
+  function logout() {
+    setStoredToken(null);
+    router.push('/login');
+  }
+
   return (
     <div className="min-h-screen bg-surface text-fg">
       <div className="mx-auto max-w-6xl px-6 py-16">
         <header className="flex flex-col items-start gap-6">
-          <div className="flex items-center gap-3">
+          <div className="flex w-full items-center gap-3">
             <div className="grid h-11 w-11 place-items-center rounded-2xl bg-accent text-white">
               <Activity size={22} strokeWidth={2.5} />
             </div>
@@ -72,6 +80,15 @@ export default function LauncherPage() {
             <Pill tone="ai">
               <Sparkles size={11} /> AI
             </Pill>
+            {signedIn === true ? (
+              <button
+                type="button"
+                onClick={logout}
+                className="ml-auto inline-flex h-9 items-center gap-1.5 rounded-xl border border-line px-3.5 text-sm font-medium text-muted transition-colors hover:border-danger/40 hover:text-danger"
+              >
+                <LogOut size={14} /> Sign out
+              </button>
+            ) : null}
           </div>
 
           <div className="max-w-2xl">

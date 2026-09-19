@@ -14,7 +14,8 @@ import { EtaService } from '../eta/eta.service';
 import { QueueService } from '../queues/queue.service';
 import { formatDisplayCode, generateTokenCode, sortKeyFor } from '../queues/queue.util';
 import type { JwtPayload } from '../auth/auth.service';
-import type { JoinQueueDto } from './token.dto';
+import type { JoinQueueDto, PushSubscribeDto } from './token.dto';
+import { PushService } from '../notifications/push.service';
 
 @Injectable()
 export class TokenService {
@@ -23,6 +24,7 @@ export class TokenService {
     private readonly events: EventBusService,
     private readonly eta: EtaService,
     private readonly queues: QueueService,
+    private readonly push: PushService,
   ) {}
 
   async join(queueId: string, dto: JoinQueueDto, actorId?: string) {
@@ -473,6 +475,14 @@ export class TokenService {
       where: { tokenId: token.id },
       orderBy: { sentAt: 'desc' },
     });
+  }
+
+  /** "Notify me" on the status page — registers this browser for real push delivery. */
+  async subscribeToPush(code: string, sub: PushSubscribeDto) {
+    const token = await this.prisma.token.findUnique({ where: { code }, select: { id: true } });
+    if (!token) throw new NotFoundException('Token not found');
+    await this.push.subscribe(token.id, sub);
+    return { ok: true };
   }
 }
 

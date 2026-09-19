@@ -97,12 +97,18 @@ function DashboardBody({
       organizationName={stats.organizationName}
       branchName={stats.branchName}
       queueCount={queues.length}
+      counterCount={counters.length}
       live={live}
       right={
         <>
           <Link href={`/checkin/${branchId}`}>
             <Button variant="secondary" size="sm">
               <QrCode size={14} /> Check-in
+            </Button>
+          </Link>
+          <Link href={`/checkin/${branchId}/qr`} target="_blank">
+            <Button variant="ghost" size="sm">
+              <QrCode size={14} /> QR code
             </Button>
           </Link>
           {queues[0] ? (
@@ -142,7 +148,7 @@ function DashboardBody({
           <ActivityFeed activity={activity} />
         </div>
 
-        <div id="settings" className="scroll-mt-20">
+        <div id="counters" className="scroll-mt-20">
           <CounterStrip counters={counters} t={t} />
         </div>
       </div>

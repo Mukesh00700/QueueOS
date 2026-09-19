@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventBusService } from '../events/event-bus.service';
 
@@ -50,9 +50,16 @@ export class OrderService {
     const order = await this.currentOpenOrder(visitId);
     if (!order) throw new NotFoundException('No open order for this visit');
 
-    const product = await this.prisma.product.findUnique({ where: { id: productId } });
+    const product = await this.prisma.product.findUnique({
+      where: { id: productId },
+      include: { branches: { select: { id: true } } },
+    });
     if (!product || !product.active || product.organizationId !== order.organizationId) {
       throw new NotFoundException('Product not found');
+    }
+    // Empty branches list = available everywhere; otherwise this branch must be in it.
+    if (product.branches.length > 0 && !product.branches.some((b) => b.id === order.branchId)) {
+      throw new BadRequestException('This product is not available at this branch');
     }
 
     await this.prisma.orderItem.upsert({

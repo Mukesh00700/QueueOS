@@ -158,6 +158,9 @@ function QueueCard({
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -172,6 +175,20 @@ function QueueCard({
       setError(err instanceof Error ? err.message : 'Could not update queue');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function handleDelete() {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await api.deleteQueue(queue.id);
+      onSaved();
+    } catch (err) {
+      setConfirmingDelete(false);
+      setDeleteError(err instanceof Error ? err.message : 'Could not delete queue');
+    } finally {
+      setDeleting(false);
     }
   }
 
@@ -193,11 +210,34 @@ function QueueCard({
         subtitle={subtitle}
         icon={<ListOrdered size={16} />}
         action={
-          <Button variant="ghost" size="sm" onClick={() => setEditing((e) => !e)}>
-            {editing ? 'Close' : 'Edit'}
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setEditing((e) => !e)}>
+              {editing ? 'Close' : 'Edit'}
+            </Button>
+            {confirmingDelete ? (
+              <>
+                <Button variant="danger" size="sm" loading={deleting} onClick={handleDelete}>
+                  Confirm delete
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => setConfirmingDelete(false)}>
+                  Cancel
+                </Button>
+              </>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmingDelete(true)}
+                className="rounded-lg p-1.5 text-subtle hover:bg-card hover:text-danger"
+                aria-label={`Delete ${queue.name}`}
+                title="Delete queue"
+              >
+                <Trash2 size={14} />
+              </button>
+            )}
+          </div>
         }
       />
+      {deleteError ? <p className="px-5 text-xs font-medium text-danger">{deleteError}</p> : null}
       {editing ? (
         <div className="px-5 pb-5">
           <QueueFields

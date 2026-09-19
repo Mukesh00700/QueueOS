@@ -3,9 +3,12 @@
 import { use, useEffect, useState } from 'react';
 import {
   Activity,
+  Bell,
+  BellOff,
   BellRing,
   CheckCircle2,
   Hand,
+  Loader2,
   MapPin,
   Star,
   XCircle,
@@ -102,6 +105,8 @@ function TokenView({ token, onChange }: { token: TokenStatusResponse; onChange: 
             </p>
           </div>
         </header>
+
+        {!TERMINAL.includes(token.status) ? <NotifyMeCard code={token.code} /> : null}
 
         {/* Recall is the single highest-leverage moment in the product: it turns
             a no-show back into a served visit, so it takes over the screen. */}
@@ -302,6 +307,100 @@ function RecallCountdown({ expiresAt }: { expiresAt: string | null }) {
 
   if (left === null) return <span className="font-semibold">a moment</span>;
   return <span className="tnum font-semibold">{left}s</span>;
+}
+
+type PushState = 'idle' | 'unsupported' | 'subscribing' | 'subscribed' | 'denied' | 'error';
+
+/**
+ * The whole point of this page is "you don't have to keep this open" — this
+ * is what actually makes that true instead of aspirational. No account, no
+ * app: just the browser's own Push API, behind one tap.
+ */
+function NotifyMeCard({ code }: { code: string }) {
+  const [state, setState] = useState<PushState>('idle');
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setState('unsupported');
+    } else if (Notification.permission === 'denied') {
+      setState('denied');
+    }
+  }, []);
+
+  async function enable() {
+    const publicKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+    if (!publicKey) {
+      setState('unsupported');
+      return;
+    }
+    setState('subscribing');
+    try {
+      const registration = await navigator.serviceWorker.register('/sw.js');
+      const permission = await Notification.requestPermission();
+      if (permission !== 'granted') {
+        setState('denied');
+        return;
+      }
+      const subscription = await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        // TS's typed-array generics and lib.dom's BufferSource disagree on
+        // ArrayBufferLike vs ArrayBuffer here even though this is a plain,
+        // valid Uint8Array at runtime — a known friction point between
+        // current TS and DOM typings, not an unsafe cast.
+        applicationServerKey: urlBase64ToUint8Array(publicKey) as BufferSource,
+      });
+      await api.subscribeToPush(code, subscription.toJSON());
+      setState('subscribed');
+    } catch {
+      setState('error');
+    }
+  }
+
+  // Nothing to offer on a browser that can't do this — no dead-end UI for it.
+  if (state === 'unsupported') return null;
+
+  return (
+    <Card className="mt-6 p-4">
+      {state === 'subscribed' ? (
+        <div className="flex items-center gap-2 text-sm font-medium text-success">
+          <Bell size={16} /> You&apos;ll be notified as your turn gets close.
+        </div>
+      ) : state === 'denied' ? (
+        <p className="flex items-center gap-1.5 text-xs text-muted">
+          <BellOff size={12} /> Notifications are blocked — enable them in your browser&apos;s site settings to use this.
+        </p>
+      ) : (
+        <button
+          type="button"
+          onClick={enable}
+          disabled={state === 'subscribing'}
+          className="flex w-full items-center justify-between gap-3 text-left disabled:opacity-60"
+        >
+          <span className="flex items-center gap-2 text-sm font-medium">
+            <Bell size={16} className="text-accent" /> Get notified when it&apos;s your turn
+          </span>
+          {state === 'subscribing' ? (
+            <Loader2 size={16} className="animate-spin text-muted" />
+          ) : (
+            <span className="text-xs font-semibold text-accent">Enable</span>
+          )}
+        </button>
+      )}
+      {state === 'error' ? (
+        <p className="mt-2 text-xs text-danger">Couldn&apos;t turn on notifications. You can keep this page open instead.</p>
+      ) : null}
+    </Card>
+  );
+}
+
+/** `applicationServerKey` needs raw bytes, not the base64url string VAPID keys are shared as. */
+function urlBase64ToUint8Array(base64String: string): Uint8Array {
+  const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+  const rawData = window.atob(base64);
+  const bytes = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) bytes[i] = rawData.charCodeAt(i);
+  return bytes;
 }
 
 function Stat({ label, value, text }: { label: string; value?: number; text?: string }) {

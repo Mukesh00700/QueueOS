@@ -13,6 +13,7 @@ import type { Prisma, Token } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventBusService } from '../events/event-bus.service';
 import { EtaService } from '../eta/eta.service';
+import { PushService } from '../notifications/push.service';
 import type { JwtPayload } from '../auth/auth.service';
 import { formatDisplayCode, minutesBetween, IN_LINE_ORDER } from './queue.util';
 import type {
@@ -39,6 +40,7 @@ export class QueueService {
     private readonly prisma: PrismaService,
     private readonly events: EventBusService,
     private readonly eta: EtaService,
+    private readonly push: PushService,
   ) {}
 
   /** Raw queue rows (config fields, not the computed live snapshot) for the setup page. */
@@ -216,8 +218,9 @@ export class QueueService {
         ? `Token ${code} — it's your turn now. Please proceed.`
         : `Token ${code} — your turn is in about ${threshold} minutes.`;
 
+    let notification: { id: string; title: string };
     try {
-      await this.prisma.notification.create({
+      notification = await this.prisma.notification.create({
         data: {
           tokenId: token.id,
           channel: 'PUSH',
@@ -231,7 +234,15 @@ export class QueueService {
       return;
     }
 
-    this.logger.log(`[notify] ${body}`);
+    // Status starts SIMULATED (the schema default) and only becomes real once
+    // delivery actually succeeds — accurate either way: SIMULATED now means
+    // "computed, but nobody was subscribed to receive it," not "not built yet."
+    const delivered = await this.push.send(token.id, { title: notification.title, body });
+    if (delivered) {
+      await this.prisma.notification.update({ where: { id: notification.id }, data: { status: 'SENT' } });
+    }
+
+    this.logger.log(`[notify] ${delivered ? 'sent' : 'simulated'}: ${body}`);
   }
 
   toSnapshot(
@@ -352,6 +363,23 @@ export class QueueService {
       await this.requireSiblingQueue(queue.branchId, queueId, dto.nextQueueId);
     }
     return this.prisma.queue.update({ where: { id: queueId }, data: dto });
+  }
+
+  /**
+   * Blocked once a single token has ever passed through this queue —
+   * `Token.queueId` cascades on delete, so removing a used queue would
+   * silently wipe real visit history, not just tidy up an unused stage.
+   * A queue with history should be closed (Status → Closed), not deleted;
+   * this only clears a queue nobody has ever checked into.
+   */
+  async delete(queueId: string) {
+    const everUsed = await this.prisma.token.count({ where: { queueId } });
+    if (everUsed > 0) {
+      throw new BadRequestException(
+        'This queue has visit history and cannot be deleted — set its status to Closed instead to stop new check-ins.',
+      );
+    }
+    await this.prisma.queue.delete({ where: { id: queueId } });
   }
 
   /**

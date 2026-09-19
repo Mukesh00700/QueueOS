@@ -5,6 +5,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { EventBusService } from '../events/event-bus.service';
 import { QueueService } from '../queues/queue.service';
 import { OrderService } from '../products/order.service';
+import { ProductService } from '../products/product.service';
 import { formatDisplayCode, minutesBetween, IN_LINE_ORDER } from '../queues/queue.util';
 import type { JwtPayload } from '../auth/auth.service';
 import type { AddOrderItemDto, CreateCounterDto, RecordPaymentDto, UpdateCounterDto } from './counter.dto';
@@ -24,6 +25,7 @@ export class CounterService {
     private readonly events: EventBusService,
     private readonly queues: QueueService,
     private readonly orders: OrderService,
+    private readonly products: ProductService,
   ) {}
 
   async create(branchId: string, dto: CreateCounterDto) {
@@ -45,6 +47,23 @@ export class CounterService {
     if (dto.queueId) await this.requireQueueInBranch(dto.queueId, counter.branchId);
     if (dto.staffUserId) await this.requireStaffInBranch(dto.staffUserId, counter.branchId);
     return this.prisma.counter.update({ where: { id: counterId }, data: dto });
+  }
+
+  /**
+   * Safe to delete outright, unlike a queue — `Token.counterId` is SetNull,
+   * so past visits just lose the "which counter" pointer instead of being
+   * destroyed. Blocked only while it's actively holding someone; complete
+   * or recall first.
+   */
+  async delete(counterId: string, user?: JwtPayload) {
+    const counter = await this.prisma.counter.findUnique({ where: { id: counterId } });
+    if (!counter) throw new NotFoundException('Counter not found');
+    this.assertBranchAccess(counter.branchId, user);
+    const holding = await this.currentToken(counterId);
+    if (holding) {
+      throw new BadRequestException('This counter is currently serving someone — complete or recall them first');
+    }
+    await this.prisma.counter.delete({ where: { id: counterId } });
   }
 
   private async requireQueueInBranch(queueId: string, branchId: string) {
@@ -87,7 +106,7 @@ export class CounterService {
       throw new BadRequestException('Counter is not assigned to a queue');
     }
 
-    const [current, upNext, snapshot] = await Promise.all([
+    const [current, upNext, snapshot, products] = await Promise.all([
       this.currentToken(counterId),
       this.prisma.token.findMany({
         where: { queueId: counter.queueId, status: { in: ['WAITING', 'RECALL_PENDING'] } },
@@ -96,6 +115,7 @@ export class CounterService {
         include: { customer: true, counter: true },
       }),
       this.queues.snapshot(counter.queueId),
+      this.products.listForBranch(counter.branchId, counter.branch.organizationId),
     ]);
     const order = current ? await this.orders.currentOpenOrder(current.visitId) : null;
 
@@ -113,6 +133,7 @@ export class CounterService {
         ? this.queues.toSnapshot(current, counter.queue.tokenPrefix, null)
         : null,
       upNext: upNext.map((t, i) => this.queues.toSnapshot(t, counter.queue!.tokenPrefix, i)),
+      products,
       order: order
         ? {
             id: order.id,

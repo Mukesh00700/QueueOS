@@ -25,6 +25,7 @@ import { ProductController } from './products/product.controller';
 import { OrderService } from './products/order.service';
 import { OrderSessionService } from './products/order-session.service';
 import { InsightsService } from './insights/insights.service';
+import { PushService } from './notifications/push.service';
 import { RecallScheduler } from './recall/recall.scheduler';
 import { RealtimeGateway } from './realtime/realtime.gateway';
 
@@ -56,6 +57,7 @@ import { RealtimeGateway } from './realtime/realtime.gateway';
     OrderService,
     OrderSessionService,
     InsightsService,
+    PushService,
     RecallScheduler,
     RealtimeGateway,
     // Authenticated by default; controllers opt out with @Public().

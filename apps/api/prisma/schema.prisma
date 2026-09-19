@@ -68,6 +68,7 @@ model Branch {
   orders       Order[]
   invoices     Invoice[]
   events       QueueEvent[]
+  products     Product[]    @relation("ProductBranches")
 
   @@unique([organizationId, code])
   @@index([organizationId])
@@ -272,6 +273,10 @@ model Product {
   organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   orderItems     OrderItem[]
   stockMovements StockMovement[]
+  /// Empty = available at every branch (the default for every product
+  /// today). Non-empty restricts it to just these — a seasonal or
+  /// branch-exclusive item.
+  branches       Branch[]        @relation("ProductBranches")
 
   @@index([organizationId])
 }
@@ -453,6 +458,7 @@ model Token {
   serviceType ServiceType? @relation(fields: [serviceTypeId], references: [id], onDelete: SetNull)
   visit         Visit          @relation(fields: [visitId], references: [id], onDelete: Cascade)
   notifications Notification[]
+  pushSubscriptions PushSubscription[]
   feedback      Feedback?
   events        QueueEvent[]
 
@@ -478,6 +484,23 @@ model Notification {
 
   @@index([tokenId])
   @@unique([tokenId, thresholdMinutes])
+}
+
+/// One browser's Web Push registration for one token's wait — created when a
+/// customer taps "Notify me" on their status page. Scoped to the token, not
+/// the customer: a fresh check-in is a fresh wait, so it re-subscribes.
+model PushSubscription {
+  id        String   @id @default(cuid())
+  tokenId   String
+  /// Unique per browser/device; re-subscribing the same one updates in place.
+  endpoint  String   @unique
+  p256dh    String
+  auth      String
+  createdAt DateTime @default(now())
+
+  token Token @relation(fields: [tokenId], references: [id], onDelete: Cascade)
+
+  @@index([tokenId])
 }
 
 model Feedback {

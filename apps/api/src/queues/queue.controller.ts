@@ -84,6 +84,13 @@ export class QueueController {
   }
 
   @MinRole('ADMIN')
+  @Delete(':id')
+  async deleteQueue(@Param('id') id: string, @Req() req: AuthedRequest) {
+    await this.queues.requireManageAccess(id, req.user!);
+    return this.queues.delete(id);
+  }
+
+  @MinRole('ADMIN')
   @Post(':id/service-types')
   async createServiceType(
     @Param('id') id: string,

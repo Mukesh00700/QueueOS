@@ -11,6 +11,9 @@ export const createProductSchema = z.object({
     .refine((v) => (GST_RATES as readonly number[]).includes(v), { message: 'Invalid GST rate' })
     .optional(),
   trackStock: z.boolean().optional(),
+  /// Which branches this product is sellable at. Omitted or empty means
+  /// every branch in the org — see product.service.ts.
+  branchIds: z.array(z.string()).optional(),
 });
 
 export type CreateProductDto = z.infer<typeof createProductSchema>;

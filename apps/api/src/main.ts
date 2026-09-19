@@ -11,14 +11,20 @@ async function bootstrap() {
     new FastifyAdapter({ logger: false }),
   );
 
-  const webOrigin = process.env.WEB_ORIGIN ?? 'http://localhost:3000';
+  // Comma-separated so a LAN IP can be added for testing from a phone
+  // (localhost:3000 means "myself" to whatever device reads a QR code, so
+  // scanning one only ever works via a LAN-reachable origin) without losing
+  // plain localhost access in the same browser.
+  const webOrigins = (process.env.WEB_ORIGIN ?? 'http://localhost:3000')
+    .split(',')
+    .map((o) => o.trim());
 
   // @fastify/cors's own default method list is GET,HEAD,POST — too narrow
   // for a REST API that PATCHes and DELETEs constantly (every Setup edit
   // form uses PATCH). Spelled out explicitly rather than relying on a
   // default that silently blocks half the app's own mutations.
   app.enableCors({
-    origin: webOrigin,
+    origin: webOrigins,
     credentials: true,
     methods: ['GET', 'POST', 'PATCH', 'PUT', 'DELETE'],
   });

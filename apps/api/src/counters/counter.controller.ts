@@ -108,4 +108,10 @@ export class CounterController {
   ) {
     return this.counters.update(id, body, req.user);
   }
+
+  @MinRole('ADMIN')
+  @Delete(':id')
+  delete(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.counters.delete(id, req.user);
+  }
 }

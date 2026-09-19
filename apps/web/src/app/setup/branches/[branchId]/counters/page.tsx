@@ -3,7 +3,7 @@
 import { use, useEffect, useState, type FormEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { ArrowLeft, ExternalLink, Monitor, Plus } from 'lucide-react';
+import { ArrowLeft, ExternalLink, Monitor, Plus, Trash2 } from 'lucide-react';
 import { ROLE_RANK } from '@queueos/core';
 import { api, type AuthUser, type BranchSummary, type CounterRow, type QueueDetail, type StaffRow } from '@/lib/api';
 import { SetupShell } from '@/components/setup-shell';
@@ -212,7 +212,22 @@ function CounterRowItem({
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
   const assignedStaff = staff.find((s) => s.id === counter.staffUserId);
+
+  async function handleDelete() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.deleteCounter(counter.id);
+      onSaved();
+    } catch (err) {
+      setConfirmingDelete(false);
+      setError(err instanceof Error ? err.message : 'Could not delete counter');
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -284,28 +299,51 @@ function CounterRowItem({
   }
 
   return (
-    <div className="flex items-center justify-between gap-4 px-5 py-4">
-      <div className="min-w-0">
-        <p className="truncate text-sm font-semibold">{counter.name}</p>
-        <p className="text-xs text-muted">
-          {counter.queue?.name ?? 'Unassigned'}
-          {assignedStaff ? ` · ${assignedStaff.name}` : ' · No staff assigned'}
-          {counter.providerName ? ` · ${counter.providerName}` : ''}
-        </p>
-      </div>
-      <div className="flex items-center gap-2">
-        <Pill tone={counter.status === 'SERVING' ? 'success' : counter.status === 'CLOSED' ? 'danger' : 'neutral'}>
-          {counter.status.toLowerCase()}
-        </Pill>
-        <Link href={`/counter/${counter.id}`} target="_blank">
-          <Button variant="ghost" size="sm">
-            <ExternalLink size={13} /> Open
+    <div className="px-5 py-4">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold">{counter.name}</p>
+          <p className="text-xs text-muted">
+            {counter.queue?.name ?? 'Unassigned'}
+            {assignedStaff ? ` · ${assignedStaff.name}` : ' · No staff assigned'}
+            {counter.providerName ? ` · ${counter.providerName}` : ''}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Pill tone={counter.status === 'SERVING' ? 'success' : counter.status === 'CLOSED' ? 'danger' : 'neutral'}>
+            {counter.status.toLowerCase()}
+          </Pill>
+          <Link href={`/counter/${counter.id}`} target="_blank">
+            <Button variant="ghost" size="sm">
+              <ExternalLink size={13} /> Open
+            </Button>
+          </Link>
+          <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
+            Edit
           </Button>
-        </Link>
-        <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
-          Edit
-        </Button>
+          {confirmingDelete ? (
+            <>
+              <Button variant="danger" size="sm" loading={busy} onClick={handleDelete}>
+                Confirm delete
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => setConfirmingDelete(false)}>
+                Cancel
+              </Button>
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setConfirmingDelete(true)}
+              className="rounded-lg p-1.5 text-subtle hover:bg-card hover:text-danger"
+              aria-label={`Delete ${counter.name}`}
+              title="Delete counter"
+            >
+              <Trash2 size={14} />
+            </button>
+          )}
+        </div>
       </div>
+      {error ? <p className="mt-2 text-xs font-medium text-danger">{error}</p> : null}
     </div>
   );
 }

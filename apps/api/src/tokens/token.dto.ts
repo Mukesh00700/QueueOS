@@ -36,3 +36,14 @@ export const feedbackSchema = z.object({
 });
 
 export type FeedbackDto = z.infer<typeof feedbackSchema>;
+
+/** Shape of `PushSubscriptionJSON` from the browser's Push API. */
+export const pushSubscribeSchema = z.object({
+  endpoint: z.string().trim().url(),
+  keys: z.object({
+    p256dh: z.string().trim().min(1),
+    auth: z.string().trim().min(1),
+  }),
+});
+
+export type PushSubscribeDto = z.infer<typeof pushSubscribeSchema>;

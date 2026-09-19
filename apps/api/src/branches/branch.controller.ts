@@ -239,8 +239,15 @@ export class BranchController {
     return this.queues.listForBranch(id);
   }
 
-  /** Raw queue config (not the live snapshot) for the business-setup page. */
-  @MinRole('ADMIN')
+  /**
+   * Raw queue config (not the live snapshot) — originally just the
+   * business-setup page's data source, now also how the transfer picker on
+   * `/queues/:id` lists sibling queues for floor staff. Nothing sensitive in
+   * here (no customer/financial data, just operational settings already
+   * visible in aggregate elsewhere), so floor-staff level is fine —
+   * `requireBranchScope` still keeps it to their own branch.
+   */
+  @MinRole('COUNTER_STAFF')
   @Get('branches/:id/queue-config')
   async queueConfig(@Param('id') id: string, @Req() req: AuthedRequest) {
     await this.requireBranchScope(id, req.user!);

@@ -1,9 +1,11 @@
 'use client';
 
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { use, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'framer-motion';
 import {
+  ArrowRightLeft,
   BellRing,
   Check,
   ChevronRight,
@@ -101,7 +103,6 @@ function CounterConsole({
   const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [confirmingSkip, setConfirmingSkip] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState('');
-  const [products, setProducts] = useState<ProductRow[]>([]);
   const successTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // A success message is a flash, not a persistent state — clear it itself.
@@ -116,12 +117,7 @@ function CounterConsole({
     setVertical(view.vertical);
   }, [view.vertical, setVertical]);
 
-  // Catalogue barely changes during a shift — fetched once, not live-polled.
-  useEffect(() => {
-    api.products().then(setProducts).catch(() => {});
-  }, []);
-
-  const { counter, queue, current, upNext, order } = view;
+  const { counter, queue, current, upNext, order, products } = view;
   const holding = current !== null;
   const isPaymentStage = view.stageType === 'PAYMENT';
   // A branch that's never configured a catalogue (hospital, salon, temple —
@@ -225,6 +221,14 @@ function CounterConsole({
         </div>
         <div className="ml-auto flex items-center gap-3">
           <Pill tone={STATUS_TONE[counter.status] ?? 'neutral'}>{STATUS_LABEL[counter.status] ?? counter.status}</Pill>
+          <Link
+            href={`/queues/${queue.id}`}
+            target="_blank"
+            className="flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1.5 text-xs font-medium text-muted transition-colors hover:border-line-strong hover:text-fg"
+            title={`Move someone waiting to a different ${t.queue.toLowerCase()}`}
+          >
+            <ArrowRightLeft size={13} /> Transfer
+          </Link>
           <span
             className={cn('h-2.5 w-2.5 rounded-full', live ? 'bg-success live-dot' : 'bg-subtle')}
             title={live ? 'Live' : 'Reconnecting'}

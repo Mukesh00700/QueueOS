@@ -60,7 +60,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     throw new ApiError(message, res.status);
   }
 
-  return res.json() as Promise<T>;
+  // A DELETE (or any handler returning nothing) sends a 200/204 with no
+  // body — res.json() throws "Unexpected end of JSON input" on that, which
+  // every delete action was silently hitting. Empty body -> undefined.
+  const text = await res.text();
+  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 // --- Types mirroring the API responses --------------------------------------
@@ -212,6 +216,8 @@ export interface CounterView {
   vertical: string;
   current: TokenSnapshotDto | null;
   upNext: TokenSnapshotDto[];
+  /** Already branch-filtered server-side — safe to render as-is. */
+  products: ProductRow[];
   order: OpenOrder | null;
 }
 
@@ -345,6 +351,8 @@ export interface ProductRow {
   trackStock: boolean;
   active: boolean;
   createdAt: string;
+  /** Branches this product is restricted to. Absent/empty = every branch. */
+  branches?: { id: string; name: string }[];
 }
 
 export interface ProductInput {
@@ -354,6 +362,8 @@ export interface ProductInput {
   hsnSac?: string;
   gstRate?: number;
   trackStock?: boolean;
+  /** Omit to leave unassigned (available everywhere); [] explicitly clears any restriction. */
+  branchIds?: string[];
 }
 
 export interface AuthUser {
@@ -381,6 +391,7 @@ export const api = {
     request<CounterRow>(`/branches/${branchId}/counters`, { method: 'POST', body: JSON.stringify(body) }),
   updateCounter: (counterId: string, body: Partial<{ name: string; queueId: string | null; staffUserId: string | null }>) =>
     request<CounterRow>(`/counters/${counterId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteCounter: (counterId: string) => request<{ ok: boolean }>(`/counters/${counterId}`, { method: 'DELETE' }),
   branchCounters: (branchId: string) => request<CounterRow[]>(`/branches/${branchId}/counters`),
   myCounters: () => request<MyCounter[]>('/counters/mine'),
   activity: (branchId: string, limit = 25) =>
@@ -397,6 +408,7 @@ export const api = {
     request<QueueDetail>(`/branches/${branchId}/queues`, { method: 'POST', body: JSON.stringify(body) }),
   updateQueue: (queueId: string, body: Partial<QueueInput>) =>
     request<QueueDetail>(`/queues/${queueId}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  deleteQueue: (queueId: string) => request<{ ok: boolean }>(`/queues/${queueId}`, { method: 'DELETE' }),
 
   serviceTypes: (queueId: string) => request<ServiceTypeRow[]>(`/queues/${queueId}/service-types`),
   createServiceType: (queueId: string, body: ServiceTypeInput) =>
@@ -438,6 +450,11 @@ export const api = {
     request<{ ok: boolean }>(`/t/${code}/feedback`, {
       method: 'POST',
       body: JSON.stringify({ rating, comment }),
+    }),
+  subscribeToPush: (code: string, subscription: PushSubscriptionJSON) =>
+    request<{ ok: boolean }>(`/t/${code}/push-subscribe`, {
+      method: 'POST',
+      body: JSON.stringify(subscription),
     }),
 
   counter: (counterId: string) => request<CounterView>(`/counters/${counterId}`),

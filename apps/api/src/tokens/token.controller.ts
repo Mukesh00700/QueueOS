@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Post } from '@nestjs/common';
 import { z } from 'zod';
 import { TokenService } from './token.service';
-import { feedbackSchema } from './token.dto';
+import { feedbackSchema, pushSubscribeSchema } from './token.dto';
 import { Public } from '../auth/auth.guard';
 import { ZodBody } from '../common/zod.pipe';
 
@@ -23,6 +23,15 @@ export class TokenController {
   @Get(':code/notifications')
   notifications(@Param('code') code: string) {
     return this.tokens.notifications(code);
+  }
+
+  /** "Notify me" — registers this browser to receive real push notifications. */
+  @Post(':code/push-subscribe')
+  pushSubscribe(
+    @Param('code') code: string,
+    @Body(new ZodBody(pushSubscribeSchema)) body: z.infer<typeof pushSubscribeSchema>,
+  ) {
+    return this.tokens.subscribeToPush(code, body);
   }
 
   /** "Still coming?" → YES */

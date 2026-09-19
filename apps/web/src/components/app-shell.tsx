@@ -14,6 +14,7 @@ import {
   ListOrdered,
   LogOut,
   Moon,
+  Monitor,
   Search,
   Settings,
   Sun,
@@ -37,6 +38,7 @@ export function AppShell({
   organizationName,
   branchName,
   queueCount,
+  counterCount,
   live,
   children,
   right,
@@ -45,6 +47,7 @@ export function AppShell({
   organizationName: string;
   branchName: string;
   queueCount?: number;
+  counterCount?: number;
   live?: boolean;
   children: ReactNode;
   right?: ReactNode;
@@ -79,6 +82,7 @@ export function AppShell({
   const nav: NavItem[] = [
     { label: 'Dashboard', href: `/dashboard/${branchId}`, icon: LayoutDashboard },
     { label: vertical.terminology.queuePlural, href: `/dashboard/${branchId}#queues`, icon: ListOrdered, badge: queueCount },
+    { label: vertical.terminology.counterPlural, href: `/dashboard/${branchId}#counters`, icon: Monitor, badge: counterCount },
     { label: 'Appointments', href: `/dashboard/${branchId}#appointments`, icon: CalendarDays },
     { label: vertical.terminology.customerPlural, href: `/dashboard/${branchId}#customers`, icon: Users },
     { label: 'AI Predictions', href: `/dashboard/${branchId}#ai`, icon: Brain },

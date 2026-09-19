@@ -4,7 +4,7 @@ import { useEffect, useState, type FormEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { Package, Plus } from 'lucide-react';
 import { ROLE_RANK, GST_RATES } from '@queueos/core';
-import { api, type AuthUser, type ProductInput, type ProductRow } from '@/lib/api';
+import { api, type AuthUser, type BranchSummary, type ProductInput, type ProductRow } from '@/lib/api';
 import { SetupShell } from '@/components/setup-shell';
 import { Button, Card, CardHeader, EmptyState, Pill, Select, Skeleton } from '@/components/ui';
 
@@ -20,11 +20,14 @@ export default function ProductsSetupPage() {
   const router = useRouter();
   const [user, setUser] = useState<AuthUser | null | undefined>(undefined);
   const [products, setProducts] = useState<ProductRow[] | null>(null);
+  const [branches, setBranches] = useState<BranchSummary[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
 
   async function load() {
     try {
-      setProducts(await api.products());
+      const [p, b] = await Promise.all([api.products(), api.branches()]);
+      setProducts(p);
+      setBranches(b);
     } catch (err) {
       setLoadError(err instanceof Error ? err.message : 'Could not load products');
     }
@@ -70,7 +73,7 @@ export default function ProductsSetupPage() {
         </Card>
       ) : null}
 
-      <CreateProductCard onCreated={load} />
+      <CreateProductCard branches={branches} onCreated={load} />
 
       <Card>
         <CardHeader
@@ -82,7 +85,7 @@ export default function ProductsSetupPage() {
           {(products ?? []).length === 0 ? (
             <EmptyState title="No products yet" detail="Add your first item above." />
           ) : (
-            (products ?? []).map((p) => <ProductRowItem key={p.id} product={p} onSaved={load} />)
+            (products ?? []).map((p) => <ProductRowItem key={p.id} product={p} branches={branches} onSaved={load} />)
           )}
         </div>
       </Card>
@@ -98,10 +101,43 @@ function readProductForm(form: FormData): ProductInput {
     hsnSac: String(form.get('hsnSac') ?? '') || undefined,
     gstRate: Number(form.get('gstRate') ?? 0),
     trackStock: form.get('trackStock') === 'on',
+    branchIds: form.getAll('branchIds').map(String),
   };
 }
 
-function CreateProductCard({ onCreated }: { onCreated: () => void }) {
+/**
+ * Left unchecked, a product is available at every branch — the only
+ * behavior that existed before this picker did, and still the default for
+ * a single-branch org. Checking specific branches restricts it to just
+ * those. Not worth rendering for an org with one branch or none: there's
+ * no meaningful choice to make.
+ */
+function BranchPicker({ branches, defaultCheckedIds }: { branches: BranchSummary[]; defaultCheckedIds: Set<string> }) {
+  if (branches.length < 2) return null;
+  return (
+    <div>
+      <span className="mb-1.5 block text-sm font-medium">
+        Available at <span className="font-normal text-muted">(none checked = every branch)</span>
+      </span>
+      <div className="flex flex-wrap gap-3">
+        {branches.map((b) => (
+          <label key={b.id} className="flex items-center gap-1.5 text-sm">
+            <input
+              type="checkbox"
+              name="branchIds"
+              value={b.id}
+              defaultChecked={defaultCheckedIds.has(b.id)}
+              className="h-4 w-4"
+            />
+            {b.name}
+          </label>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function CreateProductCard({ branches, onCreated }: { branches: BranchSummary[]; onCreated: () => void }) {
   const [open, setOpen] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -169,6 +205,8 @@ function CreateProductCard({ onCreated }: { onCreated: () => void }) {
           Track stock for this item
         </label>
 
+        <BranchPicker branches={branches} defaultCheckedIds={new Set()} />
+
         {error ? <p className="text-sm font-medium text-danger">{error}</p> : null}
 
         <div className="flex items-center gap-2">
@@ -184,7 +222,15 @@ function CreateProductCard({ onCreated }: { onCreated: () => void }) {
   );
 }
 
-function ProductRowItem({ product, onSaved }: { product: ProductRow; onSaved: () => void }) {
+function ProductRowItem({
+  product,
+  branches,
+  onSaved,
+}: {
+  product: ProductRow;
+  branches: BranchSummary[];
+  onSaved: () => void;
+}) {
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -257,6 +303,11 @@ function ProductRowItem({ product, onSaved }: { product: ProductRow; onSaved: ()
           </label>
         </div>
 
+        <BranchPicker
+          branches={branches}
+          defaultCheckedIds={new Set((product.branches ?? []).map((b) => b.id))}
+        />
+
         {error ? <p className="text-sm font-medium text-danger">{error}</p> : null}
 
         <div className="flex items-center gap-2">
@@ -283,6 +334,9 @@ function ProductRowItem({ product, onSaved }: { product: ProductRow; onSaved: ()
       </div>
       <div className="flex items-center gap-2">
         {product.trackStock ? <Pill tone="accent">stock-tracked</Pill> : null}
+        {product.branches?.length ? (
+          <Pill tone="warning">{product.branches.map((b) => b.name).join(', ')} only</Pill>
+        ) : null}
         {!product.active ? <Pill tone="danger">inactive</Pill> : null}
         <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
           Edit
