@@ -7,6 +7,8 @@ import { provisionFlow } from '../queues/flow-provisioning';
 import { EventBusService } from '../events/event-bus.service';
 import { InsightsService } from '../insights/insights.service';
 import { CounterService } from '../counters/counter.service';
+import { InvoiceService } from '../products/invoice.service';
+import { ShiftService } from '../shifts/shift.service';
 import { formatDisplayCode } from '../queues/queue.util';
 import { MinRole, Public, type AuthedRequest } from '../auth/auth.guard';
 import type { JwtPayload } from '../auth/auth.service';
@@ -14,6 +16,7 @@ import { ZodBody } from '../common/zod.pipe';
 import { createBranchSchema, updateBranchSchema, type CreateBranchDto, type UpdateBranchDto } from './branch.dto';
 import { createQueueSchema, type CreateQueueDto } from '../queues/queue.dto';
 import { createCounterSchema, type CreateCounterDto } from '../counters/counter.dto';
+import { closeShiftSchema, openShiftSchema, type CloseShiftDto, type OpenShiftDto } from '../shifts/shift.dto';
 
 @Controller()
 export class BranchController {
@@ -23,6 +26,8 @@ export class BranchController {
     private readonly events: EventBusService,
     private readonly insights: InsightsService,
     private readonly counterService: CounterService,
+    private readonly invoiceService: InvoiceService,
+    private readonly shiftService: ShiftService,
   ) {}
 
   /**
@@ -261,6 +266,13 @@ export class BranchController {
     return this.events.recent(id, Math.min(100, Number(limit) || 25));
   }
 
+  @MinRole('ADMIN')
+  @Get('branches/:id/invoices')
+  async invoices(@Param('id') id: string, @Query('limit') limit: string | undefined, @Req() req: AuthedRequest) {
+    await this.requireBranchScope(id, req.user!);
+    return this.invoiceService.listForBranch(id, Math.min(200, Number(limit) || 50));
+  }
+
   /** Counters for a branch, used by the setup page and the counter picker on the tablet. */
   @MinRole('ADMIN')
   @Get('branches/:id/counters')
@@ -271,5 +283,41 @@ export class BranchController {
       include: { queue: { select: { id: true, name: true } } },
       orderBy: { name: 'asc' },
     });
+  }
+
+  @MinRole('ADMIN')
+  @Get('branches/:id/shifts/current')
+  async currentShift(@Param('id') id: string, @Req() req: AuthedRequest) {
+    await this.requireBranchScope(id, req.user!);
+    return this.shiftService.current(id);
+  }
+
+  @MinRole('ADMIN')
+  @Get('branches/:id/shifts')
+  async shiftHistory(@Param('id') id: string, @Query('limit') limit: string | undefined, @Req() req: AuthedRequest) {
+    await this.requireBranchScope(id, req.user!);
+    return this.shiftService.history(id, Math.min(100, Number(limit) || 30));
+  }
+
+  @MinRole('ADMIN')
+  @Post('branches/:id/shifts/open')
+  async openShift(
+    @Param('id') id: string,
+    @Body(new ZodBody(openShiftSchema)) body: OpenShiftDto,
+    @Req() req: AuthedRequest,
+  ) {
+    await this.requireBranchScope(id, req.user!);
+    return this.shiftService.open(id, req.user!.organizationId, body, req.user!.sub);
+  }
+
+  @MinRole('ADMIN')
+  @Post('branches/:id/shifts/close')
+  async closeShift(
+    @Param('id') id: string,
+    @Body(new ZodBody(closeShiftSchema)) body: CloseShiftDto,
+    @Req() req: AuthedRequest,
+  ) {
+    await this.requireBranchScope(id, req.user!);
+    return this.shiftService.close(id, body, req.user!.sub);
   }
 }

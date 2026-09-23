@@ -2,7 +2,14 @@ import { Body, Controller, Get, Param, Patch, Post, Req } from '@nestjs/common';
 import { ProductService } from './product.service';
 import { MinRole, type AuthedRequest } from '../auth/auth.guard';
 import { ZodBody } from '../common/zod.pipe';
-import { createProductSchema, updateProductSchema, type CreateProductDto, type UpdateProductDto } from './product.dto';
+import {
+  createProductSchema,
+  restockSchema,
+  updateProductSchema,
+  type CreateProductDto,
+  type RestockDto,
+  type UpdateProductDto,
+} from './product.dto';
 
 /** Business-setup product catalogue. Manager and above only, same as Staff. */
 @MinRole('ADMIN')
@@ -27,5 +34,14 @@ export class ProductController {
     @Req() req: AuthedRequest,
   ) {
     return this.products.update(id, body, req.user!);
+  }
+
+  @Post(':id/restock')
+  restock(
+    @Param('id') id: string,
+    @Body(new ZodBody(restockSchema)) body: RestockDto,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.products.restock(id, body.quantity, req.user!);
   }
 }

@@ -234,6 +234,10 @@ function ProductRowItem({
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [restocking, setRestocking] = useState(false);
+  const [restockQty, setRestockQty] = useState('');
+  const [restockBusy, setRestockBusy] = useState(false);
+  const [restockError, setRestockError] = useState<string | null>(null);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -248,6 +252,26 @@ function ProductRowItem({
       setError(err instanceof Error ? err.message : 'Could not update product');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function submitRestock() {
+    const qty = Number(restockQty);
+    if (!qty || qty <= 0) {
+      setRestockError('Enter how many arrived');
+      return;
+    }
+    setRestockBusy(true);
+    setRestockError(null);
+    try {
+      await api.restockProduct(product.id, qty);
+      setRestocking(false);
+      setRestockQty('');
+      onSaved();
+    } catch (err) {
+      setRestockError(err instanceof Error ? err.message : 'Could not restock');
+    } finally {
+      setRestockBusy(false);
     }
   }
 
@@ -323,25 +347,66 @@ function ProductRowItem({
   }
 
   return (
-    <div className="flex items-center justify-between gap-4 px-5 py-4">
-      <div className="min-w-0">
-        <p className="truncate text-sm font-semibold">{product.name}</p>
-        <p className="truncate text-xs text-muted">
-          {product.category} · ₹{product.price.toFixed(2)}
-          {product.gstRate > 0 ? ` · GST ${product.gstRate}%` : ''}
-          {product.hsnSac ? ` · ${product.hsnSac}` : ''}
-        </p>
+    <div className="px-5 py-4">
+      <div className="flex items-center justify-between gap-4">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold">{product.name}</p>
+          <p className="truncate text-xs text-muted">
+            {product.category} · ₹{product.price.toFixed(2)}
+            {product.gstRate > 0 ? ` · GST ${product.gstRate}%` : ''}
+            {product.hsnSac ? ` · ${product.hsnSac}` : ''}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          {product.trackStock ? (
+            <Pill tone={(product.stock ?? 0) <= 0 ? 'danger' : (product.stock ?? 0) <= 5 ? 'warning' : 'accent'}>
+              {product.stock ?? 0} in stock
+            </Pill>
+          ) : null}
+          {product.branches?.length ? (
+            <Pill tone="warning">{product.branches.map((b) => b.name).join(', ')} only</Pill>
+          ) : null}
+          {!product.active ? <Pill tone="danger">inactive</Pill> : null}
+          {product.trackStock ? (
+            <Button variant="ghost" size="sm" onClick={() => setRestocking((r) => !r)}>
+              Restock
+            </Button>
+          ) : null}
+          <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
+            Edit
+          </Button>
+        </div>
       </div>
-      <div className="flex items-center gap-2">
-        {product.trackStock ? <Pill tone="accent">stock-tracked</Pill> : null}
-        {product.branches?.length ? (
-          <Pill tone="warning">{product.branches.map((b) => b.name).join(', ')} only</Pill>
-        ) : null}
-        {!product.active ? <Pill tone="danger">inactive</Pill> : null}
-        <Button variant="ghost" size="sm" onClick={() => setEditing(true)}>
-          Edit
-        </Button>
-      </div>
+
+      {restocking ? (
+        <div className="mt-3 flex items-center gap-2 rounded-xl border border-line bg-raised p-3">
+          <input
+            type="number"
+            min={1}
+            autoFocus
+            placeholder="Quantity received"
+            value={restockQty}
+            onChange={(event) => setRestockQty(event.target.value)}
+            className={INPUT}
+          />
+          <Button size="sm" loading={restockBusy} onClick={submitRestock}>
+            Add
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() => {
+              setRestocking(false);
+              setRestockQty('');
+              setRestockError(null);
+            }}
+          >
+            Cancel
+          </Button>
+        </div>
+      ) : null}
+      {restockError ? <p className="mt-2 text-xs font-medium text-danger">{restockError}</p> : null}
     </div>
   );
 }

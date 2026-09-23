@@ -205,6 +205,10 @@ export interface OpenOrder {
   id: string;
   subtotal: number;
   taxAmount: number;
+  discountType: string | null;
+  discountValue: number;
+  discountReason: string | null;
+  discountAmount: number;
   total: number;
   items: OrderItemRow[];
 }
@@ -353,6 +357,8 @@ export interface ProductRow {
   createdAt: string;
   /** Branches this product is restricted to. Absent/empty = every branch. */
   branches?: { id: string; name: string }[];
+  /** Stock-on-hand — null when trackStock is off, a real (possibly 0) count otherwise. */
+  stock?: number | null;
 }
 
 export interface ProductInput {
@@ -364,6 +370,90 @@ export interface ProductInput {
   trackStock?: boolean;
   /** Omit to leave unassigned (available everywhere); [] explicitly clears any restriction. */
   branchIds?: string[];
+}
+
+export interface InvoiceSummary {
+  id: string;
+  number: string;
+  subtotal: number;
+  taxAmount: number;
+  total: number;
+  status: string;
+  createdAt: string;
+  methods: string[];
+  customerName: string | null;
+  refunded: number;
+}
+
+export interface InvoiceLineItem {
+  id: string;
+  productId: string | null;
+  description: string;
+  quantity: number;
+  unitPrice: number;
+  lineTotal: number;
+  gstRate: number;
+}
+
+export interface InvoicePaymentRow {
+  id: string;
+  amount: number;
+  method: string;
+  recordedAt: string;
+}
+
+export interface InvoiceRefundRow {
+  id: string;
+  amount: number;
+  method: string;
+  reason: string;
+  recordedAt: string;
+}
+
+export interface InvoiceDetail {
+  id: string;
+  number: string;
+  subtotal: number;
+  taxAmount: number;
+  discountAmount: number;
+  discountReason: string | null;
+  total: number;
+  status: string;
+  createdAt: string;
+  branch: { name: string; organization: { name: string } };
+  payments: InvoicePaymentRow[];
+  refunds: InvoiceRefundRow[];
+  order: {
+    items: InvoiceLineItem[];
+    visit: { customer: { name: string; phone: string } | null };
+  };
+}
+
+export interface KitchenItemRow {
+  id: string;
+  description: string;
+  quantity: number;
+  kitchenStatus: string;
+}
+
+export interface KitchenTicket {
+  id: string;
+  createdAt: string;
+  customerName: string | null;
+  items: KitchenItemRow[];
+}
+
+export interface ShiftRow {
+  id: string;
+  openingCash: number;
+  countedCash: number | null;
+  status: string;
+  openedBy: string | null;
+  closedBy: string | null;
+  openedAt: string;
+  closedAt: string | null;
+  expectedCash: number;
+  variance?: number;
 }
 
 export interface AuthUser {
@@ -396,6 +486,35 @@ export const api = {
   myCounters: () => request<MyCounter[]>('/counters/mine'),
   activity: (branchId: string, limit = 25) =>
     request<ActivityEntry[]>(`/branches/${branchId}/activity?limit=${limit}`),
+
+  invoices: (branchId: string, limit = 50) =>
+    request<InvoiceSummary[]>(`/branches/${branchId}/invoices?limit=${limit}`),
+  invoice: (invoiceId: string) => request<InvoiceDetail>(`/invoices/${invoiceId}`),
+  voidInvoice: (invoiceId: string) =>
+    request<InvoiceDetail>(`/invoices/${invoiceId}/void`, { method: 'POST' }),
+  refundInvoice: (invoiceId: string, body: { amount: number; method: string; reason: string }) =>
+    request<InvoiceRefundRow>(`/invoices/${invoiceId}/refund`, { method: 'POST', body: JSON.stringify(body) }),
+
+  currentShift: (branchId: string) => request<ShiftRow | null>(`/branches/${branchId}/shifts/current`),
+  shiftHistory: (branchId: string, limit = 30) =>
+    request<ShiftRow[]>(`/branches/${branchId}/shifts?limit=${limit}`),
+  openShift: (branchId: string, openingCash: number) =>
+    request<ShiftRow>(`/branches/${branchId}/shifts/open`, {
+      method: 'POST',
+      body: JSON.stringify({ openingCash }),
+    }),
+  closeShift: (branchId: string, countedCash: number) =>
+    request<ShiftRow>(`/branches/${branchId}/shifts/close`, {
+      method: 'POST',
+      body: JSON.stringify({ countedCash }),
+    }),
+
+  kitchenBoard: (branchId: string) => request<KitchenTicket[]>(`/kitchen/${branchId}`),
+  setKitchenItemStatus: (itemId: string, status: 'QUEUED' | 'PREPARING' | 'READY') =>
+    request<KitchenItemRow>(`/kitchen/items/${itemId}/status`, {
+      method: 'POST',
+      body: JSON.stringify({ status }),
+    }),
 
   queue: (queueId: string) => request<QueueSnapshot>(`/queues/${queueId}`),
   queueDisplay: (queueId: string) => request<QueueDisplay>(`/queues/${queueId}/display`),
@@ -462,10 +581,10 @@ export const api = {
     request<CounterView>(`/counters/${counterId}/${action}`, { method: 'POST' }),
   callSpecific: (counterId: string, tokenId: string) =>
     request<CounterView>(`/counters/${counterId}/call/${tokenId}`, { method: 'POST' }),
-  recordPayment: (counterId: string, amount: number, method: string) =>
+  recordPayment: (counterId: string, tenders: { amount: number; method: string }[]) =>
     request<CounterView>(`/counters/${counterId}/record-payment`, {
       method: 'POST',
-      body: JSON.stringify({ amount, method }),
+      body: JSON.stringify({ tenders }),
     }),
   addOrderItem: (counterId: string, productId: string, quantity = 1) =>
     request<CounterView>(`/counters/${counterId}/order/items`, {
@@ -474,11 +593,17 @@ export const api = {
     }),
   removeOrderItem: (counterId: string, itemId: string) =>
     request<CounterView>(`/counters/${counterId}/order/items/${itemId}`, { method: 'DELETE' }),
+  applyDiscount: (counterId: string, body: { type: 'FLAT' | 'PERCENT'; value: number; reason: string }) =>
+    request<CounterView>(`/counters/${counterId}/discount`, { method: 'POST', body: JSON.stringify(body) }),
+  removeDiscount: (counterId: string) =>
+    request<CounterView>(`/counters/${counterId}/discount`, { method: 'DELETE' }),
 
   products: () => request<ProductRow[]>('/products'),
   createProduct: (body: ProductInput) => request<ProductRow>('/products', { method: 'POST', body: JSON.stringify(body) }),
   updateProduct: (id: string, body: Partial<ProductInput> & { active?: boolean }) =>
     request<ProductRow>(`/products/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  restockProduct: (id: string, quantity: number) =>
+    request<{ stock: number }>(`/products/${id}/restock`, { method: 'POST', body: JSON.stringify({ quantity }) }),
 
   staff: () => request<StaffRow[]>('/staff'),
   createStaff: (body: StaffInput) => request<StaffRow>('/staff', { method: 'POST', body: JSON.stringify(body) }),

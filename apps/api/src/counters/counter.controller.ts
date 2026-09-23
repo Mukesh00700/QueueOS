@@ -5,9 +5,11 @@ import { MinRole, type AuthedRequest } from '../auth/auth.guard';
 import { ZodBody } from '../common/zod.pipe';
 import {
   addOrderItemSchema,
+  discountSchema,
   recordPaymentSchema,
   updateCounterSchema,
   type AddOrderItemDto,
+  type DiscountDto,
   type RecordPaymentDto,
   type UpdateCounterDto,
 } from './counter.dto';
@@ -78,6 +80,20 @@ export class CounterController {
   @Delete(':id/order/items/:itemId')
   removeOrderItem(@Param('id') id: string, @Param('itemId') itemId: string, @Req() req: AuthedRequest) {
     return this.counters.removeOrderItem(id, itemId, req.user);
+  }
+
+  @Post(':id/discount')
+  applyDiscount(
+    @Param('id') id: string,
+    @Body(new ZodBody(discountSchema)) body: DiscountDto,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.counters.applyDiscount(id, body, req.user);
+  }
+
+  @Delete(':id/discount')
+  removeDiscount(@Param('id') id: string, @Req() req: AuthedRequest) {
+    return this.counters.removeDiscount(id, req.user);
   }
 
   @Post(':id/provider')

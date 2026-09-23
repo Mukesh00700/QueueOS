@@ -40,6 +40,7 @@ model Organization {
   products   Product[]
   invoices   Invoice[]
   events     QueueEvent[]
+  shifts     Shift[]
 }
 
 model Branch {
@@ -67,6 +68,7 @@ model Branch {
   visits       Visit[]
   orders       Order[]
   invoices     Invoice[]
+  shifts       Shift[]
   events       QueueEvent[]
   products     Product[]    @relation("ProductBranches")
 
@@ -292,6 +294,18 @@ model Order {
   /// Denormalised sum of each item's `lineTotal * gstRate / 100`, recomputed
   /// alongside `subtotal`.
   taxAmount      Float    @default(0)
+  /// DiscountType: FLAT | PERCENT. Null = no discount applied.
+  discountType   String?
+  /// The raw value staff entered — a rupee amount for FLAT, a percentage for
+  /// PERCENT. Kept alongside the derived `discountAmount` so re-applying the
+  /// same rule after the cart changes (e.g. a PERCENT discount after an item
+  /// is added) recomputes correctly instead of going stale.
+  discountValue  Float    @default(0)
+  discountReason String?
+  /// Denormalised like subtotal/taxAmount: derived from discountType/Value
+  /// against (subtotal + taxAmount) and recomputed on every cart mutation,
+  /// capped so a discount can never take the total below zero.
+  discountAmount Float    @default(0)
   /// OrderStatus: OPEN | PAID.
   status         String   @default("OPEN")
   createdAt      DateTime @default(now())
@@ -324,6 +338,12 @@ model OrderItem {
   /// convention as QueueEvent.actorId. This is the line-level attribution
   /// commission/productivity reporting needs later.
   staffUserId String?
+  /// KitchenStatus: QUEUED | PREPARING | READY. Per-item, not per-order — a
+  /// ticket with a burger and a shake needs the fryer station and the drinks
+  /// station to report in independently. A ticket clears off the kitchen
+  /// board on its own once every item on it reaches READY; nothing else
+  /// reads this column, so there's no order-level status to keep in sync.
+  kitchenStatus String @default("QUEUED")
 
   order   Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
   product Product? @relation(fields: [productId], references: [id], onDelete: SetNull)
@@ -351,6 +371,10 @@ model Invoice {
   /// (no product, no rate) — the flat "type an amount" fallback never gets
   /// taxed.
   taxAmount      Float    @default(0)
+  /// Snapshotted from the order at issue time, same reasoning as taxAmount —
+  /// a discount rule changing later must not rewrite an invoice already out.
+  discountAmount Float    @default(0)
+  discountReason String?
   total          Float
   /// InvoiceStatus: ISSUED | VOID.
   status         String   @default("ISSUED")
@@ -360,6 +384,7 @@ model Invoice {
   branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
   order        Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
   payments     Payment[]
+  refunds      Refund[]
 
   @@unique([branchId, number])
   @@index([branchId, createdAt])
@@ -381,6 +406,60 @@ model Payment {
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
 
   @@index([invoiceId])
+}
+
+/// Deliberately its own model rather than a signed row in Payment: a refund
+/// is a different kind of fact (money going back, always with a reason),
+/// not just a negative sale. Partial by nature — the amount only has to
+/// stay within what's left after any earlier refunds on the same invoice;
+/// full-invoice correction is what Invoice.status VOID is already for.
+model Refund {
+  id        String @id @default(cuid())
+  invoiceId String
+  amount    Float
+  /// PaymentMethod from @queueos/core — which method the money actually went back through.
+  method    String
+  reason    String
+  /// Staff user who recorded it. Plain id, no FK — same loose-actor
+  /// convention as QueueEvent.actorId.
+  recordedBy String?
+  recordedAt DateTime @default(now())
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+}
+
+/// A branch's cash drawer, open to close — how counted cash gets checked
+/// against what the till should hold. `expectedCash` is deliberately not a
+/// column: it's the opening float plus every CASH Payment minus every CASH
+/// Refund recorded at this branch between `openedAt` and `closedAt` (or now,
+/// while still open) — Payment/Refund rows are never edited after creation,
+/// so unlike Order's running totals this has nothing to go stale and
+/// nothing worth denormalising. Only one OPEN shift per branch at a time,
+/// enforced in ShiftService rather than a DB constraint — the same
+/// app-level "at most one" as Order's one-open-cart-per-visit rule.
+model Shift {
+  id             String @id @default(cuid())
+  organizationId String
+  branchId       String
+  /// Cash float placed in the drawer at the start of the shift.
+  openingCash    Float  @default(0)
+  /// Physically counted cash at close — null until closed.
+  countedCash    Float?
+  /// ShiftStatus: OPEN | CLOSED.
+  status         String @default("OPEN")
+  /// Staff who opened/closed it. Plain id, no FK — same loose-actor
+  /// convention as QueueEvent.actorId.
+  openedBy  String?
+  closedBy  String?
+  openedAt  DateTime  @default(now())
+  closedAt  DateTime?
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch       @relation(fields: [branchId], references: [id], onDelete: Cascade)
+
+  @@index([branchId, status])
 }
 
 model StockMovement {

@@ -103,6 +103,9 @@ function CounterConsole({
   const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [confirmingSkip, setConfirmingSkip] = useState(false);
   const [paymentAmount, setPaymentAmount] = useState('');
+  // Split tender is just this array carrying more than one entry — the
+  // common single-method case never adds a second line before submitting.
+  const [tenders, setTenders] = useState<{ amount: number; method: string }[]>([]);
   const successTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
   // A success message is a flash, not a persistent state — clear it itself.
@@ -122,23 +125,35 @@ function CounterConsole({
   const isPaymentStage = view.stageType === 'PAYMENT';
   // A branch that's never configured a catalogue (hospital, salon, temple —
   // every branch before this feature existed) should see no trace of it.
-  const hasCatalogue = products.some((p) => p.active);
+  // Checking the order's own items too matters now that the product list is
+  // stock-filtered: a cart that already holds the last unit of something
+  // must stay visible even after that item drops out of the tap grid —
+  // otherwise a real, already-committed sale would just disappear from
+  // the screen the moment stock hits zero.
+  const hasCatalogue = products.some((p) => p.active) || (order?.items.length ?? 0) > 0;
 
   // A stale confirm/amount/message should never carry over onto whichever token comes next.
   useEffect(() => {
     setConfirmingSkip(false);
     setPaymentAmount('');
+    setTenders([]);
     setMessage(null);
   }, [current?.id]);
 
   useEffect(() => () => clearTimeout(successTimer.current), []);
 
-  // The tender amount tracks the cart's tax-inclusive total as it's built
-  // up — still manually editable after, e.g. for a vertical with no
-  // catalogue lines. Must also clear back to empty if the cart empties out
-  // (e.g. the last item removed) — otherwise a stale total from a since-
-  // removed item could get submitted as the tendered amount.
+  const tenderedSoFar = tenders.reduce((sum, t) => sum + t.amount, 0);
+  const remainingBalance = order ? Math.max(0, order.total - tenderedSoFar) : 0;
+
+  // The tender amount tracks whatever's still owed as it's built up — still
+  // manually editable after, e.g. for a vertical with no catalogue lines.
+  // Must also clear back to empty if the cart empties out (e.g. the last
+  // item removed) — otherwise a stale total from a since-removed item could
+  // get submitted as the tendered amount. Resets any in-progress split too:
+  // the cart changing mid-payment invalidates whatever was already tendered
+  // against the old total.
   useEffect(() => {
+    setTenders([]);
     setPaymentAmount(order && order.total > 0 ? String(order.total) : '');
   }, [order?.total]);
 
@@ -189,24 +204,78 @@ function CounterConsole({
     }
   }
 
+  async function applyDiscount(type: 'FLAT' | 'PERCENT', value: number, reason: string) {
+    setPending('discount');
+    setMessage(null);
+    try {
+      await api.applyDiscount(counter.id, { type, value, reason });
+      onChange();
+    } catch (err) {
+      setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Could not apply discount' });
+    } finally {
+      setPending(null);
+    }
+  }
+
+  async function removeDiscount() {
+    setPending('discount');
+    setMessage(null);
+    try {
+      await api.removeDiscount(counter.id);
+      onChange();
+    } catch (err) {
+      setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Could not remove discount' });
+    } finally {
+      setPending(null);
+    }
+  }
+
+  /**
+   * A tap either finishes the sale or starts (continues) a split — never a
+   * separate mode to opt into. If this tender covers what's left, submit
+   * everything collected so far in one call; if it's short, bank it as a
+   * line and keep going. The ordinary single-method sale is just the case
+   * where the first tap already covers it all.
+   */
   async function recordPayment(method: string) {
     const amount = Number(paymentAmount);
     if (!amount || amount <= 0) {
       setMessage({ kind: 'error', text: 'Enter an amount first' });
       return;
     }
+
+    const soFar = [...tenders, { amount, method }];
+    const total = order?.total ?? 0;
+    const totalTendered = soFar.reduce((sum, t) => sum + t.amount, 0);
+
+    if (total > 0 && totalTendered < total - 0.01) {
+      setTenders(soFar);
+      const left = total - totalTendered;
+      setPaymentAmount(left.toFixed(2));
+      setMessage(null);
+      flashSuccess(`${method} ₹${amount.toFixed(2)} added — ₹${left.toFixed(2)} left`);
+      return;
+    }
+
     setPending('payment');
     setMessage(null);
     try {
-      await api.recordPayment(counter.id, amount, method);
+      await api.recordPayment(counter.id, soFar);
+      setTenders([]);
       setPaymentAmount('');
-      flashSuccess('Payment recorded');
+      flashSuccess(soFar.length > 1 ? 'Split payment recorded' : 'Payment recorded');
       onChange();
     } catch (err) {
       setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Could not record payment' });
     } finally {
       setPending(null);
     }
+  }
+
+  function clearTenders() {
+    setTenders([]);
+    setPaymentAmount(order && order.total > 0 ? String(order.total) : '');
+    setMessage(null);
   }
 
   return (
@@ -305,6 +374,28 @@ function CounterConsole({
             </Button>
             {isPaymentStage ? (
               <div className="sm:col-span-2 space-y-2">
+                {tenders.length > 0 ? (
+                  <div className="space-y-1.5 rounded-xl border border-line bg-raised p-3">
+                    {tenders.map((t, i) => (
+                      <div key={i} className="flex items-center justify-between text-sm">
+                        <span className="text-muted">{t.method}</span>
+                        <span className="tnum font-medium">₹{t.amount.toFixed(2)}</span>
+                      </div>
+                    ))}
+                    <div className="flex items-center justify-between border-t border-line pt-1.5 text-sm font-semibold">
+                      <span>Still owed</span>
+                      <span className="tnum text-warning">₹{remainingBalance.toFixed(2)}</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={clearTenders}
+                      disabled={pending !== null}
+                      className="text-xs text-subtle underline underline-offset-4 hover:text-danger disabled:opacity-50"
+                    >
+                      Clear and start over
+                    </button>
+                  </div>
+                ) : null}
                 <input
                   type="number"
                   inputMode="decimal"
@@ -398,6 +489,8 @@ function CounterConsole({
               pending={pending}
               onAdd={addProduct}
               onRemove={removeItem}
+              onApplyDiscount={applyDiscount}
+              onRemoveDiscount={removeDiscount}
             />
           ) : null}
 
@@ -467,14 +560,31 @@ function CartSection({
   pending,
   onAdd,
   onRemove,
+  onApplyDiscount,
+  onRemoveDiscount,
 }: {
   order: CounterView['order'];
   products: ProductRow[];
   pending: string | null;
   onAdd: (productId: string) => void;
   onRemove: (itemId: string) => void;
+  onApplyDiscount: (type: 'FLAT' | 'PERCENT', value: number, reason: string) => void;
+  onRemoveDiscount: () => void;
 }) {
   const categories = Array.from(new Set(products.filter((p) => p.active).map((p) => p.category)));
+  const [discounting, setDiscounting] = useState(false);
+  const [discType, setDiscType] = useState<'FLAT' | 'PERCENT'>('FLAT');
+  const [discValue, setDiscValue] = useState('');
+  const [discReason, setDiscReason] = useState('');
+
+  function submitDiscount() {
+    const value = Number(discValue);
+    if (!value || value <= 0 || !discReason.trim()) return;
+    onApplyDiscount(discType, value, discReason.trim());
+    setDiscounting(false);
+    setDiscValue('');
+    setDiscReason('');
+  }
 
   return (
     <Card className="p-5">
@@ -527,18 +637,106 @@ function CartSection({
                 <span className="tnum">₹{order.taxAmount.toFixed(2)}</span>
               </div>
             ) : null}
+            {order.discountAmount > 0 ? (
+              <div className="flex items-center justify-between text-success">
+                <span className="truncate">
+                  Discount{order.discountReason ? ` · ${order.discountReason}` : ''}
+                </span>
+                <span className="flex shrink-0 items-center gap-1.5 tnum">
+                  −₹{order.discountAmount.toFixed(2)}
+                  <button
+                    type="button"
+                    onClick={onRemoveDiscount}
+                    disabled={pending !== null}
+                    className="text-subtle transition-colors hover:text-danger disabled:opacity-50"
+                    aria-label="Remove discount"
+                  >
+                    <X size={12} />
+                  </button>
+                </span>
+              </div>
+            ) : null}
             <div className="flex items-center justify-between font-semibold">
               <span>Total</span>
               <span className="tnum">₹{order.total.toFixed(2)}</span>
             </div>
           </div>
+
+          {order.discountAmount === 0 ? (
+            discounting ? (
+              <div className="mt-2 space-y-2 rounded-xl border border-line bg-raised p-3">
+                <div className="flex gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => setDiscType('FLAT')}
+                    className={cn(
+                      'flex-1 rounded-lg border px-2 py-1.5 text-xs font-medium transition-colors',
+                      discType === 'FLAT' ? 'border-accent text-accent' : 'border-line text-muted',
+                    )}
+                  >
+                    ₹ Flat
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setDiscType('PERCENT')}
+                    className={cn(
+                      'flex-1 rounded-lg border px-2 py-1.5 text-xs font-medium transition-colors',
+                      discType === 'PERCENT' ? 'border-accent text-accent' : 'border-line text-muted',
+                    )}
+                  >
+                    % Off
+                  </button>
+                </div>
+                <input
+                  type="number"
+                  inputMode="decimal"
+                  min="0"
+                  step="0.01"
+                  placeholder={discType === 'PERCENT' ? 'e.g. 10' : 'e.g. 50'}
+                  value={discValue}
+                  onChange={(event) => setDiscValue(event.target.value)}
+                  className="h-9 w-full rounded-lg border border-line bg-card px-2.5 text-sm outline-none focus:border-accent"
+                />
+                <input
+                  type="text"
+                  placeholder="Reason (e.g. Loyalty offer)"
+                  value={discReason}
+                  onChange={(event) => setDiscReason(event.target.value)}
+                  className="h-9 w-full rounded-lg border border-line bg-card px-2.5 text-sm outline-none focus:border-accent"
+                />
+                <div className="flex gap-2">
+                  <Button
+                    size="sm"
+                    onClick={submitDiscount}
+                    disabled={!discValue || !discReason.trim() || pending !== null}
+                  >
+                    Apply
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setDiscounting(false)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setDiscounting(true)}
+                disabled={pending !== null}
+                className="mt-2 text-xs text-subtle underline underline-offset-4 hover:text-fg disabled:opacity-50"
+              >
+                + Add discount
+              </button>
+            )
+          ) : null}
         </div>
       ) : (
         <p className="mb-4 text-xs text-subtle">No items yet — tap a product to add it.</p>
       )}
 
       {categories.length === 0 ? (
-        <p className="text-xs text-subtle">No products set up yet — add some from Setup.</p>
+        <p className="text-xs text-subtle">
+          Nothing available to add right now — set up products or restock from Setup.
+        </p>
       ) : (
         <div className="space-y-3">
           {categories.map((category) => (
@@ -558,6 +756,9 @@ function CartSection({
                       <Plus size={11} className="text-accent" />
                       {product.name}
                       <span className="text-subtle">₹{product.price.toFixed(0)}</span>
+                      {product.trackStock && (product.stock ?? 0) <= 5 ? (
+                        <span className="text-warning">{product.stock} left</span>
+                      ) : null}
                     </button>
                   ))}
               </div>

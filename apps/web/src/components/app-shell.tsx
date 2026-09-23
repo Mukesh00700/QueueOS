@@ -8,6 +8,7 @@ import {
   BarChart3,
   Brain,
   CalendarDays,
+  ChefHat,
   ChevronLeft,
   FileText,
   LayoutDashboard,
@@ -15,10 +16,12 @@ import {
   LogOut,
   Moon,
   Monitor,
+  Receipt,
   Search,
   Settings,
   Sun,
   Users,
+  Wallet,
 } from 'lucide-react';
 import { ROLE_RANK } from '@queueos/core';
 import { useTheme } from '@/lib/theme';
@@ -83,11 +86,18 @@ export function AppShell({
     { label: 'Dashboard', href: `/dashboard/${branchId}`, icon: LayoutDashboard },
     { label: vertical.terminology.queuePlural, href: `/dashboard/${branchId}#queues`, icon: ListOrdered, badge: queueCount },
     { label: vertical.terminology.counterPlural, href: `/dashboard/${branchId}#counters`, icon: Monitor, badge: counterCount },
+    // Floor tool, same access tier as a counter tablet — visible to
+    // counter staff too, not just canManage roles.
+    { label: 'Kitchen', href: `/kitchen/${branchId}`, icon: ChefHat },
     { label: 'Appointments', href: `/dashboard/${branchId}#appointments`, icon: CalendarDays },
     { label: vertical.terminology.customerPlural, href: `/dashboard/${branchId}#customers`, icon: Users },
     { label: 'AI Predictions', href: `/dashboard/${branchId}#ai`, icon: Brain },
     { label: 'Analytics', href: `/dashboard/${branchId}#analytics`, icon: BarChart3 },
     { label: 'Reports', href: `/dashboard/${branchId}#reports`, icon: FileText },
+    // Financial records — same access tier as the dashboard's own revenue
+    // stats, so gated the same way as Setup rather than shown to everyone.
+    ...(canManage ? [{ label: 'Invoices', href: `/dashboard/${branchId}/invoices`, icon: Receipt }] : []),
+    ...(canManage ? [{ label: 'Shifts', href: `/dashboard/${branchId}/shifts`, icon: Wallet }] : []),
     // Only branch managers and above can configure branches/queues/staff — this
     // is the one nav item that leaves the per-branch dashboard entirely.
     ...(canManage ? [{ label: 'Setup', href: '/setup/branches', icon: Settings }] : []),

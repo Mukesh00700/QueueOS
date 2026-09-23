@@ -1,6 +1,8 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
+import { ROLE_RANK } from '@queueos/core';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventBusService } from '../events/event-bus.service';
+import type { JwtPayload } from '../auth/auth.service';
 
 const WITH_ITEMS = { items: true } as const;
 
@@ -62,23 +64,44 @@ export class OrderService {
       throw new BadRequestException('This product is not available at this branch');
     }
 
-    await this.prisma.orderItem.upsert({
-      where: { orderId_productId: { orderId: order.id, productId } },
-      create: {
-        orderId: order.id,
-        productId: product.id,
-        description: product.name,
-        quantity,
-        unitPrice: product.price,
-        lineTotal: product.price * quantity,
-        // Snapshotted at add-time — see the schema comment on this column.
-        gstRate: product.gstRate,
-        staffUserId: actorId,
-      },
-      update: {
-        quantity: { increment: quantity },
-        lineTotal: { increment: product.price * quantity },
-      },
+    await this.prisma.$transaction(async (tx) => {
+      // Checked and decremented inside the same transaction as the upsert —
+      // two rapid taps racing each other must never both pass the check and
+      // together oversell past zero.
+      if (product.trackStock) {
+        const { _sum } = await tx.stockMovement.aggregate({ where: { productId }, _sum: { quantity: true } });
+        const available = _sum.quantity ?? 0;
+        if (available < quantity) {
+          throw new BadRequestException(
+            available <= 0 ? `${product.name} is out of stock` : `Only ${available} left of ${product.name}`,
+          );
+        }
+      }
+
+      const item = await tx.orderItem.upsert({
+        where: { orderId_productId: { orderId: order.id, productId } },
+        create: {
+          orderId: order.id,
+          productId: product.id,
+          description: product.name,
+          quantity,
+          unitPrice: product.price,
+          lineTotal: product.price * quantity,
+          // Snapshotted at add-time — see the schema comment on this column.
+          gstRate: product.gstRate,
+          staffUserId: actorId,
+        },
+        update: {
+          quantity: { increment: quantity },
+          lineTotal: { increment: product.price * quantity },
+        },
+      });
+
+      if (product.trackStock) {
+        await tx.stockMovement.create({
+          data: { productId, orderItemId: item.id, quantity: -quantity, reason: 'SALE' },
+        });
+      }
     });
 
     const updated = await this.recomputeTotals(order.id);
@@ -94,6 +117,35 @@ export class OrderService {
     return updated;
   }
 
+  /**
+   * FLAT is a rupee amount off the bill, PERCENT a share of it — either way
+   * it's stored as the rule (type + value), not just the resulting rupee
+   * figure, so it stays correct as the cart keeps changing (recomputed
+   * alongside subtotal/taxAmount on every mutation, same as those already
+   * are). Applied to the post-tax total rather than reworked into each
+   * line's GST — simpler, and matches how a till coupon is usually rung up
+   * ("10% off the bill"), not a rate change on every item.
+   */
+  async applyDiscount(visitId: string, type: 'FLAT' | 'PERCENT', value: number, reason: string) {
+    const order = await this.currentOpenOrder(visitId);
+    if (!order) throw new NotFoundException('No open order for this visit');
+    await this.prisma.order.update({
+      where: { id: order.id },
+      data: { discountType: type, discountValue: value, discountReason: reason },
+    });
+    return this.recomputeTotals(order.id);
+  }
+
+  async removeDiscount(visitId: string) {
+    const order = await this.currentOpenOrder(visitId);
+    if (!order) throw new NotFoundException('No open order for this visit');
+    await this.prisma.order.update({
+      where: { id: order.id },
+      data: { discountType: null, discountValue: 0, discountReason: null },
+    });
+    return this.recomputeTotals(order.id);
+  }
+
   async removeItem(visitId: string, itemId: string, actorId: string | null) {
     const order = await this.currentOpenOrder(visitId);
     if (!order) throw new NotFoundException('No open order for this visit');
@@ -101,17 +153,86 @@ export class OrderService {
     const item = order.items.find((i) => i.id === itemId);
     if (!item) throw new NotFoundException('Line item not found');
 
-    await this.prisma.orderItem.delete({ where: { id: itemId } });
+    // The line never happened from a stock perspective — deleting its
+    // movements (rather than writing a compensating positive one) restores
+    // availability with no half-committed trace left in the ledger.
+    await this.prisma.$transaction([
+      this.prisma.stockMovement.deleteMany({ where: { orderItemId: itemId } }),
+      this.prisma.orderItem.delete({ where: { id: itemId } }),
+    ]);
     return this.recomputeTotals(order.id);
+  }
+
+  /**
+   * Every ticket still in prep at this branch, oldest first — a ticket
+   * clears itself once every item on it reaches READY, so nothing here ever
+   * needs an explicit "bump" action.
+   */
+  async kitchenBoard(branchId: string, user: JwtPayload) {
+    this.requireBranchAccess(branchId, user);
+    const orders = await this.prisma.order.findMany({
+      where: { branchId, items: { some: { kitchenStatus: { not: 'READY' } } } },
+      include: {
+        items: { orderBy: { id: 'asc' } },
+        visit: { include: { customer: { select: { name: true } } } },
+      },
+      orderBy: { createdAt: 'asc' },
+    });
+    return orders.map((order) => ({
+      id: order.id,
+      createdAt: order.createdAt,
+      customerName: order.visit.customer?.name ?? null,
+      items: order.items.map((item) => ({
+        id: item.id,
+        description: item.description,
+        quantity: item.quantity,
+        kitchenStatus: item.kitchenStatus,
+      })),
+    }));
+  }
+
+  async setItemKitchenStatus(itemId: string, status: string, user: JwtPayload) {
+    const item = await this.prisma.orderItem.findUnique({
+      where: { id: itemId },
+      select: { description: true, order: { select: { branchId: true, organizationId: true } } },
+    });
+    if (!item) throw new NotFoundException('Line item not found');
+    this.requireBranchAccess(item.order.branchId, user);
+    const updated = await this.prisma.orderItem.update({ where: { id: itemId }, data: { kitchenStatus: status } });
+    // Lets a second kitchen screen (an expo station, say) pick up the change
+    // instantly instead of waiting on useLive's 30s poll fallback.
+    await this.events.publish({
+      name: 'KitchenItemUpdated',
+      organizationId: item.order.organizationId,
+      branchId: item.order.branchId,
+      actorId: user.sub,
+      payload: { itemId, description: item.description, status },
+    });
+    return updated;
+  }
+
+  /** Same "own branch unless Owner+" scope every floor screen already enforces. */
+  private requireBranchAccess(branchId: string, user: JwtPayload) {
+    if (ROLE_RANK[user.role] < ROLE_RANK.OWNER && user.branchId !== branchId) {
+      throw new NotFoundException('Branch not found');
+    }
   }
 
   private async recomputeTotals(orderId: string) {
     const order = await this.prisma.order.findUniqueOrThrow({ where: { id: orderId }, include: WITH_ITEMS });
     const subtotal = order.items.reduce((sum, item) => sum + item.lineTotal, 0);
     const taxAmount = order.items.reduce((sum, item) => sum + (item.lineTotal * item.gstRate) / 100, 0);
+    const billTotal = subtotal + taxAmount;
+    const rawDiscount =
+      order.discountType === 'PERCENT'
+        ? billTotal * (order.discountValue / 100)
+        : order.discountType === 'FLAT'
+          ? order.discountValue
+          : 0;
+    const discountAmount = Math.min(rawDiscount, billTotal);
     return this.prisma.order.update({
       where: { id: orderId },
-      data: { subtotal, taxAmount },
+      data: { subtotal, taxAmount, discountAmount },
       include: WITH_ITEMS,
     });
   }

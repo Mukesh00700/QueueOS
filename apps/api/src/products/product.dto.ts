@@ -23,3 +23,9 @@ export const updateProductSchema = createProductSchema.partial().extend({
 });
 
 export type UpdateProductDto = z.infer<typeof updateProductSchema>;
+
+export const restockSchema = z.object({
+  quantity: z.number().int().positive().max(1_000_000),
+});
+
+export type RestockDto = z.infer<typeof restockSchema>;

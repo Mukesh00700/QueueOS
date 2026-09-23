@@ -30,6 +30,7 @@ export const QUEUE_EVENTS = [
   'PaymentCompleted',
   'PosSessionOpened',
   'OrderLineAdded',
+  'KitchenItemUpdated',
 ] as const;
 
 export type QueueEventName = (typeof QUEUE_EVENTS)[number];

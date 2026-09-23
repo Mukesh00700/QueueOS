@@ -24,6 +24,10 @@ import { ProductService } from './products/product.service';
 import { ProductController } from './products/product.controller';
 import { OrderService } from './products/order.service';
 import { OrderSessionService } from './products/order-session.service';
+import { InvoiceService } from './products/invoice.service';
+import { InvoiceController } from './products/invoice.controller';
+import { KitchenController } from './products/kitchen.controller';
+import { ShiftService } from './shifts/shift.service';
 import { InsightsService } from './insights/insights.service';
 import { PushService } from './notifications/push.service';
 import { RecallScheduler } from './recall/recall.scheduler';
@@ -46,6 +50,8 @@ import { RealtimeGateway } from './realtime/realtime.gateway';
     BranchController,
     StaffController,
     ProductController,
+    InvoiceController,
+    KitchenController,
   ],
   providers: [
     QueueService,
@@ -56,6 +62,8 @@ import { RealtimeGateway } from './realtime/realtime.gateway';
     ProductService,
     OrderService,
     OrderSessionService,
+    InvoiceService,
+    ShiftService,
     InsightsService,
     PushService,
     RecallScheduler,

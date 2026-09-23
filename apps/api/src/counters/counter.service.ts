@@ -8,7 +8,7 @@ import { OrderService } from '../products/order.service';
 import { ProductService } from '../products/product.service';
 import { formatDisplayCode, minutesBetween, IN_LINE_ORDER } from '../queues/queue.util';
 import type { JwtPayload } from '../auth/auth.service';
-import type { AddOrderItemDto, CreateCounterDto, RecordPaymentDto, UpdateCounterDto } from './counter.dto';
+import type { AddOrderItemDto, CreateCounterDto, DiscountDto, RecordPaymentDto, UpdateCounterDto } from './counter.dto';
 
 /**
  * Counter operations — the four buttons on the reception tablet.
@@ -139,7 +139,11 @@ export class CounterService {
             id: order.id,
             subtotal: order.subtotal,
             taxAmount: order.taxAmount,
-            total: order.subtotal + order.taxAmount,
+            discountType: order.discountType,
+            discountValue: order.discountValue,
+            discountReason: order.discountReason,
+            discountAmount: order.discountAmount,
+            total: order.subtotal + order.taxAmount - order.discountAmount,
             items: order.items.map((item) => ({
               id: item.id,
               productId: item.productId,
@@ -376,6 +380,22 @@ export class CounterService {
     return this.view(counterId, user);
   }
 
+  async applyDiscount(counterId: string, dto: DiscountDto, user?: JwtPayload) {
+    await this.requireCounter(counterId, user);
+    const token = await this.currentToken(counterId);
+    if (!token) throw new BadRequestException('No token is being served at this counter');
+    await this.orders.applyDiscount(token.visitId, dto.type, dto.value, dto.reason);
+    return this.view(counterId, user);
+  }
+
+  async removeDiscount(counterId: string, user?: JwtPayload) {
+    await this.requireCounter(counterId, user);
+    const token = await this.currentToken(counterId);
+    if (!token) throw new BadRequestException('No token is being served at this counter');
+    await this.orders.removeDiscount(token.visitId);
+    return this.view(counterId, user);
+  }
+
   /**
    * The payment-stage equivalent of `complete` — closing this stage out is
    * "payment recorded," not a staff button. Issues an Invoice off the
@@ -403,6 +423,7 @@ export class CounterService {
 
     const organizationId = await this.queues.orgIdForBranch(counter.branchId);
     const { order: openOrder } = await this.orders.openOrGetOrder(token.visitId, counter.branchId, organizationId);
+    const tendered = dto.tenders.reduce((sum, t) => sum + t.amount, 0);
 
     const invoice = await this.prisma.$transaction(async (tx) => {
       const orderId = openOrder.id;
@@ -415,6 +436,10 @@ export class CounterService {
       });
       let subtotal = fresh.subtotal;
       let taxAmount = fresh.taxAmount;
+      // Ignored for the ad-hoc "type an amount" fallback below, same as tax —
+      // a discount rule set against an empty cart has nothing to apply to.
+      let discountAmount = 0;
+      let discountReason: string | null = null;
 
       if (fresh.items.length === 0) {
         // The flat "type an amount" fallback — no product, no rate, no tax.
@@ -423,19 +448,21 @@ export class CounterService {
             orderId,
             description: 'Payment',
             quantity: 1,
-            unitPrice: dto.amount,
-            lineTotal: dto.amount,
+            unitPrice: tendered,
+            lineTotal: tendered,
             staffUserId: actorId ?? null,
           },
         });
-        subtotal = dto.amount;
+        subtotal = tendered;
         taxAmount = 0;
       } else {
-        // A real cart exists — the amount tendered must at least cover it.
-        // Over-tendering (change due) is fine; silently under-recording a
-        // sale is not.
-        const total = subtotal + taxAmount;
-        if (dto.amount < total - 0.01) {
+        // A real cart exists — the total tendered across every line must at
+        // least cover it. Over-tendering (change due) is fine; silently
+        // under-recording a sale is not.
+        discountAmount = fresh.discountAmount;
+        discountReason = fresh.discountReason;
+        const total = subtotal + taxAmount - discountAmount;
+        if (tendered < total - 0.01) {
           throw new BadRequestException(
             `Amount is less than the cart total of ${total.toFixed(2)}`,
           );
@@ -457,12 +484,21 @@ export class CounterService {
           number: `INV-${branch.nextInvoiceNumber - 1}`,
           subtotal,
           taxAmount,
-          total: subtotal + taxAmount,
+          discountAmount,
+          discountReason,
+          total: subtotal + taxAmount - discountAmount,
           status: 'ISSUED',
         },
       });
-      await tx.payment.create({
-        data: { invoiceId: invoice.id, amount: dto.amount, method: dto.method, recordedBy: actorId ?? null },
+      // One row per tender line — a single-method payment (the overwhelming
+      // majority) writes exactly one, same as before this existed.
+      await tx.payment.createMany({
+        data: dto.tenders.map((t) => ({
+          invoiceId: invoice.id,
+          amount: t.amount,
+          method: t.method,
+          recordedBy: actorId ?? null,
+        })),
       });
 
       return invoice;
@@ -483,12 +519,12 @@ export class CounterService {
     await this.events.publish({
       ...base,
       name: 'PaymentCompleted',
-      payload: { invoiceNumber: invoice.number, amount: dto.amount, method: dto.method },
+      payload: { invoiceNumber: invoice.number, total: tendered, tenders: dto.tenders },
     });
 
     await this.completeToken(token, counter, actorId, 'PAYMENT_RECORDED', {
-      amount: dto.amount,
-      method: dto.method,
+      total: tendered,
+      tenders: dto.tenders,
       invoiceNumber: invoice.number,
     });
     await this.queues.recalculate(counter.queueId!, actorId);

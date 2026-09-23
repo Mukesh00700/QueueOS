@@ -8,21 +8,25 @@ import type { CreateProductDto, UpdateProductDto } from './product.dto';
 export class ProductService {
   constructor(private readonly prisma: PrismaService) {}
 
-  list(user: JwtPayload) {
-    return this.prisma.product.findMany({
+  async list(user: JwtPayload) {
+    const products = await this.prisma.product.findMany({
       where: { organizationId: user.organizationId },
       include: { branches: { select: { id: true, name: true } } },
       orderBy: [{ category: 'asc' }, { name: 'asc' }],
     });
+    const stockByProduct = await this.stockByProduct(products.filter((p) => p.trackStock).map((p) => p.id));
+    return products.map((p) => ({ ...p, stock: p.trackStock ? (stockByProduct.get(p.id) ?? 0) : null }));
   }
 
   /**
    * What a specific counter's catalogue looks like: active products with no
    * branch restriction (available everywhere — the default for every
-   * product today), plus any restricted to this branch by name.
+   * product today), plus any restricted to this branch by name — and,
+   * unlike the Setup list, a tracked product actually at zero doesn't show
+   * up as a tap target at all, same as an inactive one.
    */
-  listForBranch(branchId: string, organizationId: string) {
-    return this.prisma.product.findMany({
+  async listForBranch(branchId: string, organizationId: string) {
+    const products = await this.prisma.product.findMany({
       where: {
         organizationId,
         active: true,
@@ -30,6 +34,32 @@ export class ProductService {
       },
       orderBy: [{ category: 'asc' }, { name: 'asc' }],
     });
+    const trackedIds = products.filter((p) => p.trackStock).map((p) => p.id);
+    if (trackedIds.length === 0) return products.map((p) => ({ ...p, stock: null }));
+    const stockByProduct = await this.stockByProduct(trackedIds);
+    return products
+      .filter((p) => !p.trackStock || (stockByProduct.get(p.id) ?? 0) > 0)
+      .map((p) => ({ ...p, stock: p.trackStock ? (stockByProduct.get(p.id) ?? 0) : null }));
+  }
+
+  /** Current stock-on-hand is the sum of every movement — no separate counter to drift out of sync. */
+  private async stockByProduct(productIds: string[]): Promise<Map<string, number>> {
+    if (productIds.length === 0) return new Map();
+    const sums = await this.prisma.stockMovement.groupBy({
+      by: ['productId'],
+      where: { productId: { in: productIds } },
+      _sum: { quantity: true },
+    });
+    return new Map(sums.map((s) => [s.productId, s._sum.quantity ?? 0]));
+  }
+
+  /** Manager restocking a shelf — the only way stock ever goes up. */
+  async restock(productId: string, quantity: number, user: JwtPayload) {
+    await this.requireOwnOrg(productId, user.organizationId);
+    if (quantity <= 0) throw new BadRequestException('Restock quantity must be positive');
+    await this.prisma.stockMovement.create({ data: { productId, quantity, reason: 'RESTOCK' } });
+    const stockByProduct = await this.stockByProduct([productId]);
+    return { stock: stockByProduct.get(productId) ?? 0 };
   }
 
   async create(dto: CreateProductDto, user: JwtPayload) {

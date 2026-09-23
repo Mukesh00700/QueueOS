@@ -22,6 +22,420 @@ approach over a plausible alternative, does.
 
 ---
 
+## 2026-09-23 — Kitchen display system (sixth and last of the six remaining POS gaps)
+
+**Decision:** `OrderItem` gains `kitchenStatus` (QUEUED | PREPARING | READY,
+default QUEUED) — per-item, not per-order, since a ticket with a burger and
+a shake needs the fryer station and the drinks station to report in
+independently. No new `KitchenTicket`/`Order`-level status: a ticket is just
+"this order's items, while at least one isn't READY yet," so it clears
+itself off the board the moment the last item on it is tapped to READY —
+nothing to explicitly "bump." New `/kitchen/:branchId` (board) and
+`/kitchen/items/:itemId/status` (advance one item) routes on a dedicated
+`KitchenController`, delegating to `OrderService` (which already owns
+`OrderItem`'s lifecycle) rather than a new service — same "auth in the
+controller, business logic in the service that already understands the
+entity" split every other floor screen in this codebase uses. Gated at
+`MinRole('COUNTER_STAFF')`, the same tier as the counter tablet — a kitchen
+tablet is a floor tool, not a back-office one. Added `KitchenItemUpdated` to
+`@queueos/core`'s event contract and publish it on every status change, so
+a second kitchen screen (an expo station watching the same board) updates
+within the socket's normal latency instead of waiting on `useLive`'s 30s
+poll fallback — consistent with every other POS action in this codebase
+already publishing an event for exactly this reason.
+
+The web page (`/kitchen/[branchId]`) is standalone, not nested in
+`AppShell` — same reasoning as the counter tablet: a screen meant to sit on
+a mounted tablet all day doesn't want a dashboard sidebar competing for
+space. Tickets are a grid, oldest first; a ticket past 10 minutes old gets
+a red border and pill as a simple, un-configurable staleness cue — not a
+setting, since nothing asked for one and a fixed threshold is enough to
+prove the concept. Tapping an item cycles QUEUED → PREPARING → READY →
+QUEUED (wraps around) rather than a forward-only action, so a misclick is
+one more tap to undo instead of unrecoverable.
+
+**Reason:** Sixth and last of six named POS gaps, deliberately saved for
+last as the biggest, most structurally different item — everything else
+this session extended the existing counter/invoice flow, this adds a whole
+new floor screen with its own state.
+
+**Impact:** `packages/core/src/events.ts` (`KitchenItemUpdated` added to
+`QUEUE_EVENTS` — required rebuilding `@queueos/core` via `npm run build
+--workspace=packages/core`, since it's consumed as a compiled `dist`, not
+live TS source; `apps/api`'s typecheck failed against the stale dist until
+that ran), `apps/api/prisma/schema.prisma` (`OrderItem.kitchenStatus`),
+`apps/api/src/products/order.service.ts` (`kitchenBoard`,
+`setItemKitchenStatus`, `requireBranchAccess`),
+`apps/api/src/products/kitchen.{dto,controller}.ts` (new files),
+`apps/api/src/app.module.ts` (registers `KitchenController`),
+`apps/web/src/lib/api.ts` (`KitchenTicket`/`KitchenItemRow`,
+`kitchenBoard`/`setKitchenItemStatus`), `apps/web/src/app/kitchen/[branchId]/page.tsx`
+(new page), `apps/web/src/components/app-shell.tsx` (new "Kitchen" nav item,
+visible to every staff role, not just `canManage` — matches the API's
+COUNTER_STAFF gate). Verified live against the running dev server: hit the
+board via curl and confirmed it returned every existing order in the branch
+still holding a non-READY item (this feature landing after the fact meant
+all prior test orders from this session legitimately appeared, since their
+items had never been touched); advanced a real item QUEUED → PREPARING →
+READY via curl and confirmed its ticket dropped out of the very next board
+read; confirmed the branch-scope guard 404s on a request for a branch that
+isn't the caller's own. Then checked the actual page in the browser: all
+tickets rendered correctly with live item counts and per-item status
+labels; tapping an item advanced its status in place with no reload and the
+header's ticket count updated live; tapping a single-item ticket's only
+item to READY correctly made the whole ticket vanish from the board;
+confirmed visually that tickets older than 10 minutes render with the red
+"late" pill/border while two fresh (7-minute) tickets correctly stayed
+neutral. `npm run typecheck` (both workspaces) and `test-flow.sh` clean
+throughout; `prisma generate`'s binary copy hit the known dev-server file
+lock, stale binary confirmed working against the new column at runtime,
+same as every prior schema change this session.
+
+---
+
+## 2026-09-23 — Shift close / cash reconciliation (fifth of the six remaining POS gaps)
+
+**Decision:** New `Shift` model — one OPEN shift per branch at a time
+(enforced in `ShiftService`, app-level, same as Order's one-open-cart-
+per-visit rule; not a DB constraint). Opening records the float placed in
+the drawer; closing records what staff physically counted. Deliberately
+no `expectedCash` column: it's always derived — opening float + every CASH
+`Payment` − every CASH `Refund` recorded at that branch between `openedAt`
+and `closedAt` (or now, while still open) — because unlike Order's running
+totals, Payment/Refund rows are never edited after creation, so there's
+nothing for a stored figure to go stale against and nothing worth
+denormalising. `variance` (`countedCash − expectedCash`) is likewise
+computed, not stored. History re-runs the same window query per closed
+shift rather than freezing a value at close time — `closedAt` is fixed
+once set, so it's exactly as correct as a stored figure, one query per row
+instead of one column.
+
+Routes live on `BranchController` (`/branches/:id/shifts[/current|/open|
+/close]`) rather than a dedicated controller — same pattern `invoices()`
+already uses to call `InvoiceService` from there, since every shift
+operation is inherently branch-scoped and `requireBranchScope` already
+lives on that controller. ADMIN-gated, same tier as Invoices — cash
+reconciliation is a financial control, not a floor action.
+
+**Reason:** Fifth of six named POS gaps. Without this, a branch has no way
+to answer "does the cash in the drawer match what was actually rung up
+today" — the entire reason a POS tracks payment method at all.
+
+**Impact:** `apps/api/prisma/schema.prisma` (new `Shift` model,
+`Branch.shifts`/`Organization.shifts` back-relations),
+`apps/api/src/shifts/{shift.dto,shift.service}.ts` (new files),
+`apps/api/src/branches/branch.controller.ts` (four new routes),
+`apps/api/src/app.module.ts` (registers `ShiftService`),
+`apps/web/src/lib/api.ts` (`ShiftRow`, `currentShift`/`shiftHistory`/
+`openShift`/`closeShift`), `apps/web/src/app/dashboard/[branchId]/shifts/page.tsx`
+(new page — open/close forms plus a settled/over/short history list),
+`apps/web/src/components/app-shell.tsx` (new "Shifts" nav item, same
+ADMIN gate as Invoices). Verified live via curl against the running dev
+server: opened a shift with a ₹500 float, confirmed opening a second one
+is rejected (`HTTP 400`) while the first is still open; rang up a real
+₹120 CASH sale and confirmed `expectedCash` correctly became ₹620; rang up
+a ₹90 CARD sale and confirmed it correctly left `expectedCash` unchanged
+at ₹620 (only CASH moves the drawer); refunded ₹50 of the CASH sale and
+confirmed `expectedCash` correctly dropped to ₹570; closed with counted
+₹560 and confirmed the returned `variance` was exactly `-10`; confirmed
+`current` returns `null` immediately after close and `close` on a branch
+with no open shift correctly 404s. Separately verified the actual page in
+the browser: the live "Expected cash now" figure, the Close-shift form
+submitting and correctly flipping the page to "No shift open," and the
+history list rendering both a positive (+₹5.00) and negative (−₹10.00)
+variance with the correct sign placement (caught and fixed a `₹-10.00`
+formatting bug live — minus belongs before the ₹ symbol, matching how
+refunds/discounts already render negative amounts elsewhere in the app).
+`npm run typecheck` and `test-flow.sh` clean throughout; `prisma
+generate`'s binary copy hit the known dev-server file lock, stale binary
+confirmed working against the new model at runtime, same as every prior
+model change this session.
+
+---
+
+## 2026-09-23 — Discounts (fourth of the six remaining POS gaps)
+
+**Decision:** `Order` gains `discountType` (FLAT | PERCENT, nullable), `discountValue`
+(the raw rupee amount or percentage staff entered), `discountReason`, and a
+denormalised `discountAmount` — same "store the rule, recompute the derived
+figure on every mutation" shape `subtotal`/`taxAmount` already use, so a
+PERCENT discount stays correct if a line is added or removed after it's
+applied rather than freezing against the cart at apply-time. Applied to the
+post-tax bill (`subtotal + taxAmount`), not reworked into each line's GST —
+simpler, and matches how a till coupon is normally rung up ("10% off the
+bill"), not a rate change on every item. Capped at the bill total so a
+discount can never push it negative (`Math.min(rawDiscount, subtotal +
+taxAmount)`); re-applying a new discount replaces the old one rather than
+stacking, since a cart only carries one active discount rule at a time.
+`POST /counters/:id/discount` applies/replaces it, `DELETE .../discount`
+clears it; a PERCENT over 100% is rejected by the DTO. `record-payment`'s
+tender-sufficiency check and the invoice it issues both use the discounted
+total — `Invoice` gained matching `discountAmount`/`discountReason` columns,
+snapshotted at issue time for the same reason `taxAmount` already is (a
+later change to the order shouldn't rewrite an invoice already out). Ignored
+entirely on the ad-hoc "type an amount" fallback path (empty cart, no
+discount rule) — same as tax already is there.
+
+**Reason:** Fourth of six named POS gaps. A counter that can ring up a full
+bill but never take a rupee or percent off it can't run a loyalty offer, a
+manager comp, or a coupon — all routine floor asks.
+
+**Impact:** `apps/api/prisma/schema.prisma` (`Order.discount*` fields,
+`Invoice.discountAmount`/`discountReason`), `apps/api/src/products/order.service.ts`
+(`applyDiscount`/`removeDiscount`, `recomputeTotals` now derives
+`discountAmount`), `apps/api/src/counters/{counter.dto,counter.service,counter.controller}.ts`
+(`discountSchema`, the two counter methods, `view()`'s order payload, and
+`recordPayment`'s total/invoice now net of discount), `apps/web/src/lib/api.ts`
+(`OpenOrder`/`InvoiceDetail` discount fields, `applyDiscount`/`removeDiscount`),
+`apps/web/src/app/counter/[counterId]/page.tsx` (Flat/% form, discount line
+with inline remove, gated behind `order.discountAmount === 0` so only one
+rule can be active), `apps/web/src/app/invoices/[invoiceId]/page.tsx`
+(receipt's Discount line). Verified live end to end via curl against the
+running dev server: rang up a real ₹199 item (₹208.95 with GST), applied a
+10% discount (→ ₹20.895 off), replaced it with a FLAT ₹15 discount to
+confirm re-applying replaces rather than stacks, confirmed PERCENT 150 is
+rejected (`HTTP 400`, "A percentage discount cannot exceed 100%"), confirmed
+a FLAT ₹9999 discount correctly caps at the full bill (`discountAmount:
+208.95, total: 0`) rather than going negative, then applied a real FLAT ₹20
+discount and recorded payment — the resulting Invoice correctly stored
+`discountAmount: 20`, `discountReason`, and `total: 188.95`, and the receipt
+page correctly rendered "Discount · Coupon FLAT20 −₹20.00". Separately
+verified the counter tablet's actual UI on a second live cart: opened the
+"+ Add discount" form, picked % Off, applied 15% (line rendered "Discount ·
+Birthday special −₹31.34", total updated to ₹177.61), then used the discount
+line's × to remove it and confirmed the cart correctly reverted to its
+undiscounted ₹208.95 total. `npm run typecheck` and `test-flow.sh` clean
+throughout; `prisma generate`'s binary copy hit the known dev-server file
+lock, stale binary confirmed working against the new columns at runtime,
+same as every prior model change this session.
+
+---
+
+## 2026-09-23 — Refunds (third of the six remaining POS gaps)
+
+**Decision:** New `Refund` model, kept deliberately separate from
+`Payment` rather than a signed/negative row in the same table — a
+refund is a different kind of fact (money going back, always with a
+`reason`), and `Payment` had no place for one. `POST /invoices/:id/refund`
+takes `{amount, method, reason}`, capped against what's actually left:
+`invoice.total - sum(existing refunds)`, so repeated partial refunds can
+never together exceed the invoice total no matter how many are made.
+Refunding a `VOID` invoice is rejected outright — void already means
+nothing is owed, so there's nothing left to refund. The invoice detail
+page's "Refund" button only appears while `refundable > 0.01` and
+disappears once an invoice is fully refunded; the receipt shows a
+"Refunded"/"Net" line and a "Refunds" section listing every refund's
+method and reason once any exist; the invoices list badges an invoice
+"Refunded" (full) or "Partially refunded" (partial) next to the existing
+"Void" badge.
+
+**Reason:** Third of six named POS gaps. A cash-register system that can
+take money but never give it back isn't usable for real service
+recovery (wrong order, complaint, customer walked). Modeled as its own
+table instead of extending `Payment` so "how much was refunded and why"
+stays a first-class, always-reasoned fact rather than a payment method
+inferred from a negative sign.
+
+**Impact:** `apps/api/prisma/schema.prisma` (new `Refund` model +
+`Invoice.refunds` back-relation), `apps/api/src/products/invoice.dto.ts`
+(new file, `refundSchema`), `apps/api/src/products/invoice.service.ts`
+(`refund()`, `getById`/`listForBranch` extended to include refund data),
+`apps/api/src/products/invoice.controller.ts` (`POST :id/refund`),
+`apps/web/src/lib/api.ts` (`refundInvoice`, `InvoiceRefundRow`,
+`InvoiceDetail.refunds`, `InvoiceSummary.refunded`),
+`apps/web/src/app/invoices/[invoiceId]/page.tsx` (Refund button + inline
+form + receipt sections), `apps/web/src/app/dashboard/[branchId]/invoices/page.tsx`
+(Refunded/Partially refunded badge). Verified live: opened a real ₹250
+ad-hoc invoice, recorded a partial ₹100 refund with a reason, confirmed
+the receipt correctly showed "Refunded −₹100.00 / Net ₹150.00" and the
+list showed "Partially refunded"; confirmed the over-refund guard via
+curl (`HTTP 400`, `"Only ₹150.00 is left to refund on this invoice"`,
+since the browser's own `max` attribute blocks that case client-side
+before it can reach the server); confirmed the void-invoice guard via
+curl against a real void invoice (`HTTP 400`, `"This invoice is void —
+nothing left to refund"`); recorded the remaining ₹150 refund and
+confirmed the "Refund" button correctly disappeared, the receipt showed
+"Refunded −₹250.00 / Net ₹0.00" with both refund lines listed, and the
+list correctly flipped the badge from "Partially refunded" to
+"Refunded". `npm run typecheck` and `test-flow.sh` clean throughout;
+`prisma generate`'s binary copy failed on the known dev-server file lock
+but the stale binary confirmed working correctly against the new model
+at runtime, same as every prior model added this session.
+
+---
+
+## 2026-09-23 — Split tender (second of the six remaining POS gaps)
+
+**Decision:** `Payment.invoiceId` was deliberately left non-unique back
+when the commerce model was first built, specifically so "an invoice can
+carry multiple payments for split tender" — but `recordPayment` only
+ever wrote one. Changed its contract from `{amount, method}` to
+`{tenders: [{amount, method}]}` (min 1, max 4): the sum across every
+tender line is what's checked against the cart total (same
+over/under-tender rule as before, just summed), and one `Payment` row is
+written per line via `createMany` inside the same transaction as the
+`Invoice`. No schema change — this was always the shape `Payment` was
+built for.
+
+The harder part was the counter tablet, since a genuinely different
+interaction was needed without slowing down the common single-tender
+case (still one tap, unchanged). A tap either finishes the sale or
+extends an in-progress split, decided by the same rule server-side and
+client-side: does this tender cover what's left? If yes, everything
+collected so far (including this tap) submits in one call, exactly
+today's one-tap flow when it's the first and only tender. If it falls
+short, it's banked as a line, the amount field re-fills to the real
+remaining balance, and the token stays in `Serving` — un-changed from a
+customer's perspective, since they haven't been served yet, just not
+fully paid. A small running summary (`CASH ₹100 / CARD ₹108.95 / Still
+owed ₹0`) plus a "Clear and start over" escape hatch sits above the
+amount field only once a split is actually in progress — nothing new to
+look at for the 95% of sales that are one tender, one tap.
+
+**Reason:** Third of six named POS gaps, picked next since the data
+model already anticipated it and `test-flow.sh` doesn't exercise
+`record-payment` at all (confirmed by grep before starting) — meaning
+this needed real live verification, not just a clean typecheck, to
+trust it actually works.
+
+**Impact:** `apps/api/src/counters/{counter.dto,counter.service}.ts`
+(breaking contract change on `POST /counters/:id/record-payment`, same
+turn as the only caller), `apps/web/src/lib/api.ts`
+(`recordPayment(counterId, tenders)`),
+`apps/web/src/app/counter/[counterId]/page.tsx` (the tender-tracking
+state and UI). `PaymentCompleted`'s event payload changed from
+`{amount, method}` to `{total, tenders}` — confirmed nothing in the web
+app parses that payload's fields before making the change. Verified
+live end to end, deliberately including the case `test-flow.sh` can't
+reach: rang up a real cart (₹208.95 with GST), split it ₹100 CASH + the
+rest CARD, confirmed the token stayed `Serving` after the partial tap
+and the running balance/summary rendered correctly, confirmed the final
+tap completed it and issued one Invoice carrying both Payment rows,
+confirmed the invoice list correctly showed "cash, card" and the
+receipt correctly showed both lines summing to the real total, then
+separately ran an ordinary single-tender ad-hoc sale start to finish to
+confirm zero regression in the one-tap case. `npm run typecheck` and
+`test-flow.sh` clean throughout.
+
+---
+
+## 2026-09-23 — Real inventory depletion (first of the six remaining POS gaps)
+
+**Decision:** The "Track stock" checkbox on a product has been inert
+since it was built — checked or not, nothing anywhere read or wrote it.
+`StockMovement` already existed as a correctly-shaped append-only ledger
+(no separate "current stock" column to drift out of sync — stock-on-hand
+is just the sum of its movements, same pattern `QueueEvent` already
+uses for history), just never written to. Wired it up:
+`OrderService.addItem` now checks available stock and writes a negative
+movement inside the same transaction as the cart upsert for a
+`trackStock` product (transaction matters here specifically — two rapid
+taps racing each other must never both pass the check and jointly
+oversell past zero); `removeItem` deletes that line's movements rather
+than writing a compensating positive one, since the line never happened
+from a stock perspective once it's been taken back out of the cart.
+`ProductService` gained `restock` (Setup → Products, a plain "quantity
+received" input) and both product-list methods now attach a computed
+`stock` field — `list()` (Setup, admin view) shows the real number even
+at zero or negative so a manager knows to restock; `listForBranch` (the
+counter tablet's tap grid) instead drops a tracked product entirely once
+it hits zero, same as an inactive one, and shows "N left" once stock
+drops to 5 or under.
+
+**Bug found and fixed during live verification, not requested but
+discovered testing the above:** depleting a branch's only tracked
+product to zero made its entire cart section vanish from the counter
+tablet — not just the tap grid, the *already-added, already-priced*
+line items too, along with the running total. `hasCatalogue` (which
+gates whether the cart section renders at all) was computed purely from
+the current stock-filtered product list, which is correct for "does
+this branch sell anything" but wrong the moment that list can empty out
+mid-transaction from a live stock change — a real, already-committed
+₹417.90 order briefly had no UI showing it existed. Confirmed via a
+direct database read that the order data itself was always intact (this
+was a display bug, not data loss), then fixed by also checking whether
+the order already has items: `products.some(p => p.active) ||
+(order?.items.length ?? 0) > 0`. Also tightened the empty-state copy
+next to it — "No products set up yet" is only true in one of the two
+cases that message now covers (configured-but-depleted is the other),
+so it reads "Nothing available to add right now" instead, correct
+either way.
+
+**Reason:** First of six POS gaps named earlier this session
+(inventory, split tender, refunds, discounts, shift close, kitchen
+display), tackled in order of how self-contained each one is —
+inventory needed nothing from the others to be correct and complete.
+
+**Impact:** `apps/api/src/products/{product,order}.service.ts`,
+`apps/api/src/products/{product.controller,product.dto}.ts` (new
+restock endpoint), `apps/web/src/lib/api.ts` (`ProductRow.stock`,
+`restockProduct`), `apps/web/src/app/setup/products/page.tsx` (stock
+pill + inline restock form), `apps/web/src/app/counter/[counterId]/page.tsx`
+(low-stock label, the `hasCatalogue` fix, the copy fix). No schema
+change — `StockMovement` was already exactly the right shape. Verified
+live rather than by inspection: enabled tracking on a real product,
+restocked it to 2, sold both through the actual counter tablet
+(confirmed the "N left" label ticking down live), confirmed the product
+correctly disappeared from the tap grid at zero, confirmed a direct API
+call to force-add a third unit was correctly rejected with a clear
+message, confirmed removing a cart line correctly restored stock and
+brought the product back, and confirmed Setup → Products reflected the
+real count at every step. `npm run typecheck` and `test-flow.sh` clean
+throughout, including after the mid-verification fix.
+
+---
+
+## 2026-09-23 — Invoice viewer (the other write-only data path closed)
+
+**Decision:** Same shape of gap as the push notifications entry above —
+`CounterService.recordPayment` has always issued a real, correctly
+numbered `Invoice` with real GST math, nothing ever read one back. Built
+the read side: `InvoiceService` (`apps/api/src/products/invoice.service.ts`)
+with `listForBranch` (summary rows — number, total, status, tender
+method(s), customer name, newest first), `getById` (full line items,
+payments, customer, branch/org — for a real receipt), and `void` (flips
+`Invoice.status` to `VOID`, one-way, idempotency-guarded against
+double-voiding — the schema already had `ISSUED | VOID` sitting there
+unused, same "add the column, wire the behavior later" pattern as
+`Product.branches` and `Notification.status` before it). New
+`InvoiceController` (`@MinRole('ADMIN')`, matches the dashboard's own
+access tier — financial data, not floor-staff level) for `:id` and
+`:id/void`; the branch-scoped list lives on `BranchController` alongside
+`activity`, matching that existing convention. Frontend: a real
+"Invoices" list page (`/dashboard/:branchId/invoices`, with its own
+sidebar nav entry — learned from the counters-nav gap two entries back
+not to bury a whole feature behind a scroll with no link to it) and a
+standalone, printable receipt page (`/invoices/:id`, same `print:`
+pattern as the QR page — no AppShell chrome, since its job is to be
+printed, not navigated) with the void action on it.
+
+**Reason:** Direct follow-on request after push notifications, framed
+the same way: find what's computed correctly but never surfaced, and
+surface it. Explicitly scoped to the viewer + void — shift close,
+inventory depletion, split-tender UI, and a kitchen display system are
+separate, larger POS gaps named earlier and deliberately left alone
+here rather than folded in unasked.
+
+**Impact:** `apps/api/src/products/{invoice.service,invoice.controller}.ts`
+(new), `apps/api/src/branches/branch.controller.ts` (`branches/:id/invoices`),
+`apps/api/src/app.module.ts`, `apps/web/src/lib/api.ts` (types +
+`invoices`/`invoice`/`voidInvoice`), new
+`apps/web/src/app/dashboard/[branchId]/invoices/page.tsx` and
+`apps/web/src/app/invoices/[invoiceId]/page.tsx`,
+`apps/web/src/components/app-shell.tsx` (nav entry). No schema change —
+`Invoice.status` was already exactly `ISSUED | VOID`. Verified live end
+to end rather than by inspection: recorded two real payments through
+actual counters (one ad-hoc/no-catalogue, one itemized with real GST) to
+generate real invoices, confirmed both rendered correctly in the list
+and as full receipts (correct customer, correct line items, correct
+subtotal/GST/total, correct tender method), exercised the two-step void
+confirm live and confirmed both the detail page and the list reflected
+it immediately, and confirmed a `COUNTER_STAFF`-rank account is
+correctly refused (403) on both the list and detail endpoints via a
+direct API call. `npm run typecheck` and `test-flow.sh` clean throughout.
+
+---
+
 ## 2026-09-19 — Real Web Push notifications (the SIMULATED gap closed)
 
 **Decision:** `QueueService.maybeNotify` has known exactly when and what
