@@ -22,6 +22,346 @@ approach over a plausible alternative, does.
 
 ---
 
+## 2026-09-24 — Thermal receipt print styling (sixth and last of the post-POS-list follow-ups)
+
+**Decision:** Scoped this to what's actually checkable in this
+environment. The receipt page (`/invoices/[invoiceId]`) already had a
+Print button calling `window.print()`, styled generically for Letter/A4
+(`print:hidden`/`print:border-none`/`print:shadow-none` only — no page
+size, no receipt-width constraint). Added: an inline `@page { size: 80mm
+auto; margin: 0; }` rule (the standard thermal-roll width — auto height,
+since a receipt roll isn't page-broken the way Letter/A4 is) and
+`print:max-w-[72mm] print:font-mono print:text-[11px]` on the receipt
+container, so the printed output is actually shaped like a receipt
+instead of a scaled-down A4 page.
+
+**Deliberately not built:** raw ESC-POS byte generation for direct
+USB/serial/network printer control. That's the other half of "receipt
+printing" in a real POS, but it needs an actual printer (or at least a
+printer-agent) to target and verify against — building it here would be
+unreachable code with no way to confirm it's even correct, the kind of
+half-finished implementation this session has otherwise avoided
+throughout. Flagged explicitly rather than silently skipped.
+
+**Reason:** Sixth and last of the post-POS-list follow-ups. Most thermal
+receipt printers ship with a driver that makes them appear as an ordinary
+system printer, so `window.print()` reaching a correctly-shaped 80mm page
+already gets most of the real-world value without needing raw protocol
+work — the CSS is what was actually missing, and it's the only half of
+this gap that's honest to build without hardware.
+
+**Impact:** `apps/web/src/app/invoices/[invoiceId]/page.tsx` (the `@page`
+style tag, the print-scoped width/font classes). Verified as far as this
+environment allows: confirmed the page still renders correctly with no
+runtime error from the inline `<style>` tag; confirmed via direct CSSOM
+inspection in the live browser (`document.styleSheets`) that Tailwind
+actually compiled the arbitrary-value print utilities rather than
+silently dropping them (a real risk with bracket-notation values) —
+`@media print { .print\:max-w-\[72mm\] { max-width: 72mm; } ...
+.print\:font-mono { font-family: "JetBrains Mono", ... } ...
+.print\:text-\[11px\] { font-size: 11px; } }` all present and correctly
+scoped. Could not verify actual printed output (hardcopy or even a
+browser print-preview) — no printer, real or virtual, and no print-media
+emulation available through the tools in this environment; noted
+explicitly as the boundary of what this session could confirm.
+`npm run typecheck` and `test-flow.sh` clean.
+
+**This closes the six-item post-POS-list follow-up set** (CI pipeline,
+staff performance, cross-branch reporting, loyalty/rewards, supplier/PO
+tracking, receipt printing) — everything from that list that was free to
+build without a paid third-party account is now done.
+
+---
+
+## 2026-09-24 — Supplier / purchase-order tracking (fifth of the post-POS-list follow-ups)
+
+**Decision:** New `Supplier`, `PurchaseOrder`, `PurchaseOrderItem` models.
+A PO's line items snapshot `description`/`unitCost` at creation time —
+same reasoning as `OrderItem`: a product renamed or repriced later must
+not rewrite a PO already placed. Receiving a PO (`status: OPEN →
+RECEIVED`) pushes each line's quantity into the *same* `StockMovement`
+ledger a sale already depletes — one more producer into an existing
+table, not a parallel stock concept — skipping lines for products with
+`trackStock` off, same as a sale already does. The existing manual
+"Restock" button on the Products page is untouched and still there for a
+quick count with no formal paperwork; POs are the structured path for a
+real, trackable supplier delivery — the two coexist rather than one
+replacing the other.
+
+New `apps/api/src/procurement/` module (`ProcurementService` +
+`ProcurementController`, both ADMIN-gated) handles Supplier CRUD and PO
+create/receive; the branch-scoped PO *list* lives on `BranchController`
+instead, matching the same split every other branch-scoped resource in
+this codebase already uses (list on `BranchController`, mutations on
+their own resource controller). New Setup tab `/setup/suppliers` —
+Suppliers and Purchase Orders share one page rather than two, since
+splitting a domain this small into separate tabs would just be extra
+navigation with no real separation of concerns.
+
+**Reason:** Fifth of the post-POS-list follow-ups. The catalogue could
+already track stock depleting on a sale but had no way to record where
+new stock actually came from, at what cost, or whether an order placed
+with a supplier had even arrived yet.
+
+**Impact:** `apps/api/prisma/schema.prisma` (three new models, back-relations
+on `Organization`/`Branch`/`Product`), `apps/api/src/procurement/{procurement.dto,
+procurement.service,procurement.controller}.ts` (new files),
+`apps/api/src/branches/branch.controller.ts` (`GET branches/:id/purchase-orders`),
+`apps/api/src/app.module.ts` (registers the new service/controller),
+`apps/web/src/lib/api.ts` (`SupplierRow`/`PurchaseOrder*` types and
+endpoints), `apps/web/src/app/setup/suppliers/page.tsx` (new page),
+`apps/web/src/components/setup-shell.tsx` (new "Suppliers" tab). Verified
+live against the running dev server: created a real supplier, placed a
+20-unit PO against Connaught Place's actual Classic Cheeseburger stock
+(7 on hand at the time), confirmed receiving it correctly pushed stock to
+27 and correctly rejected being received a second time (`HTTP 400`,
+"already been received"). Then, through the browser UI itself: the
+Suppliers/Orders list rendered the just-created supplier and PO
+correctly; placed a second 5-unit PO through the real create form and
+confirmed it showed "Open" with a "Mark received" button; clicked it and
+confirmed the status flipped to "Received" live; navigated to the
+Products page and confirmed stock read exactly 32 (7 + 20 + 5),
+closing the loop from PO to ledger to catalogue display.
+
+**Incident during this item:** the long-running API dev server (`nest
+start --watch`) was found dead partway through this item's verification
+(`HTTP 000` on port 4000) — unrelated to this session's code, since a
+fresh `nest start --watch` run immediately after booted every route,
+including the new Procurement ones, with zero compile errors. Restarted
+it in the background and confirmed recovery before continuing
+verification; flagging this since it's now the second dev-server outage
+this session (see the `.next` corruption entry above) — this project's
+dev servers are proving fragile to interruption in this environment and
+may be worth a `.claude/launch.json`-managed restart path if it keeps
+recurring.
+
+**Impact (typecheck/tests):** `npm run typecheck` (both workspaces) and
+`test-flow.sh` clean throughout; `prisma generate`'s binary copy hit the
+known dev-server file lock, stale binary confirmed working against the
+three new models at runtime.
+
+---
+
+## 2026-09-24 — Loyalty / rewards (fourth of the post-POS-list follow-ups)
+
+**Decision:** `Customer.loyaltyPoints` — one running balance, no separate
+ledger table. Earning happens inside `recordPayment`'s existing
+transaction: `floor(invoice.total / LOYALTY_EARN_RATE)` (₹10 per point)
+points credited to the token's customer, only when one exists, snapshotted
+onto the new `Invoice.loyaltyPointsEarned` for the receipt. Redeeming
+reuses the discount mechanism built earlier this engagement rather than a
+new pathway — a redemption **is** a FLAT discount worth `points *
+LOYALTY_POINT_VALUE` (₹1 per point), applied through the exact same
+`discountType`/`discountValue`/`discountReason` slot a manual discount
+uses, capped at both the customer's balance and what the bill can absorb.
+
+**Two real bugs found and fixed during this item's own live verification,
+before it was considered done:**
+1. **Repeated redemption calls silently burned points.** Redeem 20, then
+   redeem 5 more on the same order — the discount slot's "replace, don't
+   stack" rule (correct for a manual discount, which costs nothing to
+   reapply) overwrote the first ₹20 discount with a plain ₹5 one, even
+   though the first 20 points had already been irreversibly decremented.
+   Customer down 25 points, bill only down ₹5. Fixed: `redeemLoyaltyPoints`
+   now detects an already-active loyalty redemption (via the reason
+   string's `Loyalty redemption` prefix — the only writer of that exact
+   text) and **adds** to it instead of replacing it.
+2. **Removing or overwriting an active redemption didn't refund the
+   points.** Tapping the discount line's × (or applying a manual discount
+   over an active redemption) cleared the discount but left the spent
+   points gone — value destroyed for nothing. Fixed: both `removeDiscount`
+   and `applyDiscount` now check for an active loyalty redemption first
+   and refund its points back to the customer before clearing/overwriting
+   it.
+
+Both fixes share one helper, `pointsBehind(order)` — no new schema column;
+detecting "this discount came from loyalty" via the reason-string prefix
+is enough since this app is the only writer of that exact text.
+
+**Reason:** Fourth of the post-POS-list follow-ups. The two bugs above are
+exactly the kind of thing "reuse the existing discount mechanism" risks
+if the two features' invariants aren't reconciled — worth documenting
+prominently since the fix pattern (check-then-refund before
+overwrite/clear) is the general lesson, not just specific to loyalty.
+
+**Impact:** `apps/api/prisma/schema.prisma` (`Customer.loyaltyPoints`,
+`Invoice.loyaltyPointsEarned`), `apps/api/src/products/order.service.ts`
+(`LOYALTY_POINT_VALUE`, `LOYALTY_EARN_RATE`, `pointsBehind`,
+`redeemLoyaltyPoints`, and the `applyDiscount`/`removeDiscount` fixes),
+`apps/api/src/counters/{counter.dto,counter.service,counter.controller}.ts`
+(`POST :id/loyalty/redeem`, `view()`'s `customerLoyaltyPoints`),
+`apps/web/src/lib/api.ts` (`OpenOrder.customerLoyaltyPoints`,
+`InvoiceDetail.loyaltyPointsEarned`, `redeemPoints`),
+`apps/web/src/app/counter/[counterId]/page.tsx` (redeem control, same
+gating as the discount form), `apps/web/src/app/invoices/[invoiceId]/page.tsx`
+(receipt's "Earned N loyalty pts" line). Verified live end to end against
+a real customer at Khan Market (created this session for cross-branch
+testing): a ₹250 ad-hoc sale correctly earned 25 points; on the
+customer's next visit, redeeming 20 of those points correctly applied a
+₹20 discount and dropped the balance to 5; **caught the accumulation bug**
+by redeeming 100 more (capped to the remaining 5, but replaced rather than
+added — bill only reflected 5 points' worth despite 25 being spent);
+fixed, then reproduced the exact same sequence again and confirmed two
+redemptions (3 pts, then 2 more) correctly accumulated to a single 5-point
+discount; confirmed removing that discount correctly refunded all 5
+points; completed a real sale with a 10-point mid-transaction redemption
+and confirmed the resulting invoice correctly showed `discountAmount: 5`,
+`loyaltyPointsEarned: 20`, and the receipt rendered both the discount line
+and the "Earned 20 loyalty pts" line correctly; confirmed the customer's
+final balance (20) matched hand-calculated expectations exactly. Also
+verified the redeem control and the refund-on-remove fix directly through
+the browser UI, not just via curl. `npm run typecheck` (both workspaces)
+and `test-flow.sh` clean throughout; `prisma generate`'s binary copy hit
+the known dev-server file lock, stale binary confirmed working against
+the new columns at runtime, same as every prior schema change this
+session.
+
+---
+
+## 2026-09-24 — Cross-branch reporting (third of the post-POS-list follow-ups)
+
+**Decision:** `InvoiceService.orgSummary(organizationId, since)` — every
+branch's revenue, discounts given, refunds, and net side by side, for a
+selected window. Fetches full `Invoice` rows (with their `refunds`) for
+the org and reduces in JS per branch rather than a Prisma `groupBy`,
+because `Refund` has no `branchId` column of its own (only reachable via
+the `invoice` relation) and `groupBy` can't group across a relation — at
+this scale (a small business's branches) that's cheaper to write and
+just as fast as forcing it into SQL. New route `GET /branches/summary`
+(2-segment literal path — checked it can't collide with any registered
+`branches/:id/...` route, all of which are 3+ segments) gated
+`MinRole('OWNER')`, since an ADMIN is already confined to one branch
+everywhere else in the product and this route has no `:id` to scope down
+to. New standalone page `/organization` (not nested under `AppShell`,
+which needs a single `branchId` to render around) with a Today/7-day/
+30-day toggle and a totals footer row, linked from the launcher's
+"Branches" section — only when the signed-in user is OWNER+.
+
+**Reason:** Third of the post-POS-list follow-ups. Every other report
+built this engagement (Invoices, Shifts, Staff performance) is
+deliberately branch-scoped, which was correct for each of them
+individually but left genuinely nothing anywhere that answers "how's the
+whole business doing" for an owner running more than one branch.
+
+**Impact:** `apps/api/src/products/invoice.service.ts` (`orgSummary`),
+`apps/api/src/branches/branch.controller.ts` (`GET branches/summary`),
+`apps/web/src/lib/api.ts` (`BranchSummaryRow`, `branchesSummary`),
+`apps/web/src/app/organization/page.tsx` (new page),
+`apps/web/src/app/page.tsx` (launcher gains an "Org summary" link,
+OWNER-only). Verified live: created a real second branch ("Khan Market")
+under Burger Junction as Owner, gave it its own Payment-stage queue and
+counter, rang up a real ₹350 ad-hoc UPI sale there; confirmed the "Today"
+window correctly showed only that fresh sale (Connaught Place's activity
+was all from the prior day, correctly zeroed); confirmed "Last 7 days"
+correctly rolled in Connaught Place's full history (7 invoices, ₹1216.85
+revenue, ₹20 discounts, ₹350 refunded, ₹866.85 net) alongside Khan
+Market's, with the totals footer correctly summing both (8 invoices,
+₹1566.85 revenue, ₹1216.85 net); confirmed an ADMIN gets `HTTP 403`
+("Requires OWNER or higher") on the same route. In the browser: the
+Today/7-day toggle correctly re-fetched and re-rendered; the launcher's
+"Org summary" link correctly appeared for the Owner account and was
+correctly absent for the Admin account, which also correctly saw only
+its own branch in the branches list (confirms `GET /branches` itself is
+already org-scoped-but-role-filtered, not a new finding but a useful
+cross-check). `npm run typecheck` and `test-flow.sh` clean throughout.
+
+---
+
+## 2026-09-24 — Staff performance report (second of the post-POS-list follow-ups)
+
+**Decision:** `InvoiceService.staffPerformance(branchId, since)` — three
+cleanly attributable, independently-queried facts per staff member, not a
+computed commission payout: items rung up (`OrderItem.staffUserId`, scoped
+to lines whose order was actually invoiced — a removed or never-paid cart
+line earns nothing), payments personally recorded (`Payment.recordedBy`),
+and refunds personally processed (`Refund.recordedBy`). Deliberately does
+**not** net refunds against the original seller's revenue — a `Refund` has
+no `OrderItem`-level link back to which line it covers (it's recorded
+against the whole invoice), so there's no honest way to attribute it to a
+specific earlier sale; refunds show as their own column instead. New route
+`GET /branches/:id/staff-performance?since=` on `BranchController`
+(existing `startOfToday()` from `queue.service.ts` as the default — same
+helper `InsightsService` already reuses across module boundaries), new
+page `/dashboard/[branchId]/staff-performance` with a Today / 7-day /
+30-day toggle.
+
+**Reason:** Second of the post-POS-list follow-ups (pure engineering, no
+paid dependency) — `OrderItem.staffUserId` has been captured on every line
+all engagement but nothing ever read it back into a report.
+
+**Impact:** `apps/api/src/products/invoice.service.ts`
+(`staffPerformance`), `apps/api/src/branches/branch.controller.ts` (new
+route), `apps/web/src/lib/api.ts` (`StaffPerformanceRow`,
+`staffPerformance`), `apps/web/src/app/dashboard/[branchId]/staff-performance/page.tsx`
+(new page), `apps/web/src/components/app-shell.tsx` (new nav item).
+Verified live: default (no `since`) correctly returned `[]` since all of
+this engagement's test activity happened the prior day; an explicit
+7-day window correctly returned real attributed figures matching this
+session's actual testing (Admin User: 7 items, ₹1207 revenue, 9 payments,
+₹1426.85 cash handled, 4 refunds totaling ₹350); an invalid `since`
+correctly 400s. Confirmed in the browser: the Today/7-day toggle
+correctly flips between the empty state and the populated table.
+
+**Incident during this item's verification:** running
+`npm run build --workspace @queueos/web` (a production build, done to dry-
+run the new CI pipeline) while `next dev` was live corrupted the shared
+`.next/` directory both processes write to — `next dev` and `next build`
+are not safe to run concurrently against the same output folder. Every
+page on the site started 500ing (`Cannot find module
+'./vendor-chunks/motion-dom.js'`). Fixed by deleting `.next` and
+restarting the web dev server (killing just `next dev`'s child
+`start-server.js` process did **not** self-heal as expected — the parent
+CLI process exited too, contrary to assumption; had to relaunch
+`npm run dev --workspace @queueos/web` outright). Confirmed recovery by
+reloading every page built this session (staff performance, shifts,
+kitchen, invoices) rather than just the one that surfaced the error.
+Lesson for any future CI dry-run against a live dev environment: build a
+throwaway copy of the repo, or at minimum never run `next build` in the
+same working directory as a live `next dev`.
+
+---
+
+## 2026-09-24 — CI pipeline (first of the post-POS-list follow-ups)
+
+**Decision:** New `.github/workflows/ci.yml`, running on every push and PR
+to `main`: install → build `@queueos/core` (both apps consume it as a
+compiled `dist`, not live source, so everything downstream needs this
+first) → typecheck both apps → **production build** of both apps (`nest
+build`, `next build` — everything run locally all engagement has been dev
+mode, which is more forgiving than a real build) → push the schema and
+seed demo data into a throwaway Postgres service container → boot the
+built API → run `test-flow.sh` against it. One job, ubuntu-latest, a
+Postgres 16 service container rather than a hosted external database —
+free, ephemeral, no account needed.
+
+The API-start-and-test step deliberately backgrounds `node dist/main.js`
+and runs the smoke test in the *same* shell step rather than splitting
+"start" and "test" into two steps — a background process from one step
+isn't reliably still alive for the next one to depend on.
+
+**Reason:** First of the post-list follow-ups — protects every feature
+built this engagement (and everything after) from a silent regression,
+and directly closes part of the "hosting readiness" gap flagged earlier:
+this is the first time either app's actual production build has been
+verified at all, since every local run all engagement has been `nest
+start --watch` / `next dev`. Picked first because it's foundational and
+unaffected by any other pending decision (e.g. table/seating scope).
+
+**Impact:** `.github/workflows/ci.yml` (new file). No application code
+changed. Verified by dry-running the exact sequence locally against a
+throwaway `QueueOS_CI_Test` database on a second port (4001), fully
+isolated from the real dev DB and the running dev API on :4000 — schema
+push, seed, a from-scratch `nest build` boot, and `test-flow.sh` all
+passed end to end (exit 0) before this was trusted enough to commit;
+confirmed the real dev environment was untouched afterward
+(`localhost:4000/api/verticals` still healthy). Also confirmed
+`npm run build --workspace @queueos/web` produces a clean production
+build locally (19 routes compiled, 0 errors) as part of validating this
+pipeline — the first direct evidence either app builds cleanly outside
+dev mode.
+
+---
+
 ## 2026-09-23 — Kitchen display system (sixth and last of the six remaining POS gaps)
 
 **Decision:** `OrderItem` gains `kitchenStatus` (QUEUED | PREPARING | READY,

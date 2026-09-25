@@ -209,6 +209,7 @@ export interface OpenOrder {
   discountValue: number;
   discountReason: string | null;
   discountAmount: number;
+  customerLoyaltyPoints: number | null;
   total: number;
   items: OrderItemRow[];
 }
@@ -372,6 +373,58 @@ export interface ProductInput {
   branchIds?: string[];
 }
 
+export interface SupplierRow {
+  id: string;
+  name: string;
+  phone: string | null;
+  email: string | null;
+  notes: string | null;
+  createdAt: string;
+}
+
+export interface SupplierInput {
+  name: string;
+  phone?: string;
+  email?: string;
+  notes?: string;
+}
+
+export interface PurchaseOrderItemRow {
+  id: string;
+  productId: string | null;
+  description: string;
+  quantity: number;
+  unitCost: number;
+  lineTotal: number;
+}
+
+export interface PurchaseOrderSummary {
+  id: string;
+  status: string;
+  notes: string | null;
+  createdAt: string;
+  receivedAt: string | null;
+  supplier: { name: string };
+  items: { lineTotal: number }[];
+}
+
+export interface PurchaseOrderDetail {
+  id: string;
+  status: string;
+  notes: string | null;
+  createdAt: string;
+  receivedAt: string | null;
+  supplier: SupplierRow;
+  items: PurchaseOrderItemRow[];
+}
+
+export interface CreatePurchaseOrderInput {
+  branchId: string;
+  supplierId: string;
+  notes?: string;
+  items: { productId: string; quantity: number; unitCost: number }[];
+}
+
 export interface InvoiceSummary {
   id: string;
   number: string;
@@ -417,6 +470,7 @@ export interface InvoiceDetail {
   taxAmount: number;
   discountAmount: number;
   discountReason: string | null;
+  loyaltyPointsEarned: number;
   total: number;
   status: string;
   createdAt: string;
@@ -441,6 +495,27 @@ export interface KitchenTicket {
   createdAt: string;
   customerName: string | null;
   items: KitchenItemRow[];
+}
+
+export interface BranchSummaryRow {
+  branchId: string;
+  branchName: string;
+  invoiceCount: number;
+  revenue: number;
+  discountGiven: number;
+  refunded: number;
+  netRevenue: number;
+}
+
+export interface StaffPerformanceRow {
+  staffId: string;
+  name: string;
+  itemsSold: number;
+  revenue: number;
+  paymentsRecorded: number;
+  cashHandled: number;
+  refundsProcessed: number;
+  refundAmount: number;
 }
 
 export interface ShiftRow {
@@ -508,6 +583,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ countedCash }),
     }),
+
+  branchesSummary: (since?: string) =>
+    request<BranchSummaryRow[]>(`/branches/summary${since ? `?since=${encodeURIComponent(since)}` : ''}`),
+
+  staffPerformance: (branchId: string, since?: string) =>
+    request<StaffPerformanceRow[]>(
+      `/branches/${branchId}/staff-performance${since ? `?since=${encodeURIComponent(since)}` : ''}`,
+    ),
 
   kitchenBoard: (branchId: string) => request<KitchenTicket[]>(`/kitchen/${branchId}`),
   setKitchenItemStatus: (itemId: string, status: 'QUEUED' | 'PREPARING' | 'READY') =>
@@ -597,6 +680,8 @@ export const api = {
     request<CounterView>(`/counters/${counterId}/discount`, { method: 'POST', body: JSON.stringify(body) }),
   removeDiscount: (counterId: string) =>
     request<CounterView>(`/counters/${counterId}/discount`, { method: 'DELETE' }),
+  redeemPoints: (counterId: string, points: number) =>
+    request<CounterView>(`/counters/${counterId}/loyalty/redeem`, { method: 'POST', body: JSON.stringify({ points }) }),
 
   products: () => request<ProductRow[]>('/products'),
   createProduct: (body: ProductInput) => request<ProductRow>('/products', { method: 'POST', body: JSON.stringify(body) }),
@@ -604,6 +689,19 @@ export const api = {
     request<ProductRow>(`/products/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
   restockProduct: (id: string, quantity: number) =>
     request<{ stock: number }>(`/products/${id}/restock`, { method: 'POST', body: JSON.stringify({ quantity }) }),
+
+  suppliers: () => request<SupplierRow[]>('/suppliers'),
+  createSupplier: (body: SupplierInput) => request<SupplierRow>('/suppliers', { method: 'POST', body: JSON.stringify(body) }),
+  updateSupplier: (id: string, body: Partial<SupplierInput>) =>
+    request<SupplierRow>(`/suppliers/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+
+  purchaseOrders: (branchId: string, limit = 50) =>
+    request<PurchaseOrderSummary[]>(`/branches/${branchId}/purchase-orders?limit=${limit}`),
+  purchaseOrder: (id: string) => request<PurchaseOrderDetail>(`/purchase-orders/${id}`),
+  createPurchaseOrder: (body: CreatePurchaseOrderInput) =>
+    request<PurchaseOrderDetail>('/purchase-orders', { method: 'POST', body: JSON.stringify(body) }),
+  receivePurchaseOrder: (id: string) =>
+    request<PurchaseOrderDetail>(`/purchase-orders/${id}/receive`, { method: 'POST' }),
 
   staff: () => request<StaffRow[]>('/staff'),
   createStaff: (body: StaffInput) => request<StaffRow>('/staff', { method: 'POST', body: JSON.stringify(body) }),

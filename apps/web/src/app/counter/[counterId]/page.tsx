@@ -230,6 +230,19 @@ function CounterConsole({
     }
   }
 
+  async function redeemPoints(points: number) {
+    setPending('discount');
+    setMessage(null);
+    try {
+      await api.redeemPoints(counter.id, points);
+      onChange();
+    } catch (err) {
+      setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Could not redeem points' });
+    } finally {
+      setPending(null);
+    }
+  }
+
   /**
    * A tap either finishes the sale or starts (continues) a split — never a
    * separate mode to opt into. If this tender covers what's left, submit
@@ -491,6 +504,7 @@ function CounterConsole({
               onRemove={removeItem}
               onApplyDiscount={applyDiscount}
               onRemoveDiscount={removeDiscount}
+              onRedeemPoints={redeemPoints}
             />
           ) : null}
 
@@ -562,6 +576,7 @@ function CartSection({
   onRemove,
   onApplyDiscount,
   onRemoveDiscount,
+  onRedeemPoints,
 }: {
   order: CounterView['order'];
   products: ProductRow[];
@@ -570,12 +585,15 @@ function CartSection({
   onRemove: (itemId: string) => void;
   onApplyDiscount: (type: 'FLAT' | 'PERCENT', value: number, reason: string) => void;
   onRemoveDiscount: () => void;
+  onRedeemPoints: (points: number) => void;
 }) {
   const categories = Array.from(new Set(products.filter((p) => p.active).map((p) => p.category)));
   const [discounting, setDiscounting] = useState(false);
   const [discType, setDiscType] = useState<'FLAT' | 'PERCENT'>('FLAT');
   const [discValue, setDiscValue] = useState('');
   const [discReason, setDiscReason] = useState('');
+  const [redeeming, setRedeeming] = useState(false);
+  const [redeemValue, setRedeemValue] = useState('');
 
   function submitDiscount() {
     const value = Number(discValue);
@@ -584,6 +602,14 @@ function CartSection({
     setDiscounting(false);
     setDiscValue('');
     setDiscReason('');
+  }
+
+  function submitRedeem() {
+    const points = Number(redeemValue);
+    if (!points || points <= 0) return;
+    onRedeemPoints(Math.floor(points));
+    setRedeeming(false);
+    setRedeemValue('');
   }
 
   return (
@@ -725,6 +751,41 @@ function CartSection({
                 className="mt-2 text-xs text-subtle underline underline-offset-4 hover:text-fg disabled:opacity-50"
               >
                 + Add discount
+              </button>
+            )
+          ) : null}
+
+          {order.discountAmount === 0 && order.customerLoyaltyPoints !== null && order.customerLoyaltyPoints > 0 ? (
+            redeeming ? (
+              <div className="mt-2 space-y-2 rounded-xl border border-line bg-raised p-3">
+                <p className="text-xs text-subtle">{order.customerLoyaltyPoints} pts available · ₹1 each</p>
+                <input
+                  type="number"
+                  inputMode="numeric"
+                  min="1"
+                  max={order.customerLoyaltyPoints}
+                  placeholder={`Up to ${order.customerLoyaltyPoints}`}
+                  value={redeemValue}
+                  onChange={(event) => setRedeemValue(event.target.value)}
+                  className="h-9 w-full rounded-lg border border-line bg-card px-2.5 text-sm outline-none focus:border-accent"
+                />
+                <div className="flex gap-2">
+                  <Button size="sm" onClick={submitRedeem} disabled={!redeemValue || pending !== null}>
+                    Redeem
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setRedeeming(false)}>
+                    Cancel
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setRedeeming(true)}
+                disabled={pending !== null}
+                className="mt-2 block text-xs text-subtle underline underline-offset-4 hover:text-fg disabled:opacity-50"
+              >
+                + Redeem loyalty points ({order.customerLoyaltyPoints} available)
               </button>
             )
           ) : null}

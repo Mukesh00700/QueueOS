@@ -98,6 +98,7 @@ export function AppShell({
     // stats, so gated the same way as Setup rather than shown to everyone.
     ...(canManage ? [{ label: 'Invoices', href: `/dashboard/${branchId}/invoices`, icon: Receipt }] : []),
     ...(canManage ? [{ label: 'Shifts', href: `/dashboard/${branchId}/shifts`, icon: Wallet }] : []),
+    ...(canManage ? [{ label: 'Staff performance', href: `/dashboard/${branchId}/staff-performance`, icon: Users }] : []),
     // Only branch managers and above can configure branches/queues/staff — this
     // is the one nav item that leaves the per-branch dashboard entirely.
     ...(canManage ? [{ label: 'Setup', href: '/setup/branches', icon: Settings }] : []),

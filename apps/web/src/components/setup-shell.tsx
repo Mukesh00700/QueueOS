@@ -10,6 +10,7 @@ const TABS = [
   { label: 'Branches', href: '/setup/branches' },
   { label: 'Staff', href: '/setup/staff' },
   { label: 'Products', href: '/setup/products' },
+  { label: 'Suppliers', href: '/setup/suppliers' },
 ];
 
 /**

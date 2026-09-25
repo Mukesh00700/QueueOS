@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  DATABASE_URL: postgresql://postgres:password@localhost:5432/QueueOS?schema=public
+  PORT: 4000
+  WEB_ORIGIN: http://localhost:3000
+  JWT_SECRET: ci-test-secret-not-for-production
+  JWT_EXPIRES_IN: 12h
+  # Deliberately unset: PushService degrades to "simulated only" without
+  # them (see push.service.ts) rather than failing to boot, and the smoke
+  # test never exercises push.
+  VAPID_PUBLIC_KEY: ''
+  VAPID_PRIVATE_KEY: ''
+  VAPID_SUBJECT: 'mailto:ci@example.com'
+  NEXT_PUBLIC_VAPID_PUBLIC_KEY: ''
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: QueueOS
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      # @queueos/core is consumed by both apps as a compiled dist, not live
+      # TS source — everything downstream (typecheck, builds) needs this
+      # built first or it fails against a stale/missing dist.
+      - run: npm run build:core
+
+      - run: npm run typecheck
+
+      # Production build verification for both apps — dev mode (what every
+      # local run of this project uses) is more forgiving than a real build.
+      - run: npm run build --workspace @queueos/api
+      - run: npm run build --workspace @queueos/web
+
+      - name: Push schema and seed demo data
+        working-directory: apps/api
+        run: |
+          npx prisma db push --skip-generate
+          npx prisma generate
+          npm run db:seed
+
+      # Started and used in the same step deliberately — a background
+      # process from one step isn't reliably still around for the next.
+      - name: Start the API and run the smoke test
+        run: |
+          node apps/api/dist/main.js &
+          for i in $(seq 1 30); do
+            curl -sf http://localhost:4000/api/verticals > /dev/null && break
+            sleep 1
+          done
+          curl -sf http://localhost:4000/api/verticals > /dev/null || { echo "API did not come up in time" >&2; exit 1; }
+          bash apps/api/test-flow.sh

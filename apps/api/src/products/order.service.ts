@@ -6,6 +6,22 @@ import type { JwtPayload } from '../auth/auth.service';
 
 const WITH_ITEMS = { items: true } as const;
 
+/** ₹1 off the bill per point redeemed. */
+export const LOYALTY_POINT_VALUE = 1;
+/** ₹ actually paid per point earned — see CounterService.recordPayment. */
+export const LOYALTY_EARN_RATE = 10;
+
+/**
+ * How many points are "behind" an order's current discount, if any — 0 for
+ * a manual discount or no discount at all. Detected by the reason string
+ * redeemLoyaltyPoints always writes; no separate `discountSource` column,
+ * since this app is the only writer of that exact prefix.
+ */
+function pointsBehind(order: { discountType: string | null; discountReason: string | null; discountValue: number }): number {
+  if (order.discountType !== 'FLAT' || !order.discountReason?.startsWith('Loyalty redemption')) return 0;
+  return Math.round(order.discountValue / LOYALTY_POINT_VALUE);
+}
+
 /**
  * The Order-as-cart: what a visit is buying, built up line by line as it
  * moves through its stages. See build-plan.md Phase 8 for how this started
@@ -129,20 +145,99 @@ export class OrderService {
   async applyDiscount(visitId: string, type: 'FLAT' | 'PERCENT', value: number, reason: string) {
     const order = await this.currentOpenOrder(visitId);
     if (!order) throw new NotFoundException('No open order for this visit');
-    await this.prisma.order.update({
-      where: { id: order.id },
-      data: { discountType: type, discountValue: value, discountReason: reason },
+
+    // Same reasoning as removeDiscount: overwriting an active loyalty
+    // redemption must refund the points it already spent, not just
+    // silently drop them. The counter UI never lets both happen (it hides
+    // "Add discount" while a discount is already active), but the service
+    // layer shouldn't depend on the UI to hold that invariant.
+    const redeemedPoints = pointsBehind(order);
+    await this.prisma.$transaction(async (tx) => {
+      if (redeemedPoints > 0) {
+        const visit = await tx.visit.findUniqueOrThrow({ where: { id: visitId }, select: { customerId: true } });
+        if (visit.customerId) {
+          await tx.customer.update({ where: { id: visit.customerId }, data: { loyaltyPoints: { increment: redeemedPoints } } });
+        }
+      }
+      await tx.order.update({
+        where: { id: order.id },
+        data: { discountType: type, discountValue: value, discountReason: reason },
+      });
     });
+
     return this.recomputeTotals(order.id);
   }
 
   async removeDiscount(visitId: string) {
     const order = await this.currentOpenOrder(visitId);
     if (!order) throw new NotFoundException('No open order for this visit');
-    await this.prisma.order.update({
-      where: { id: order.id },
-      data: { discountType: null, discountValue: 0, discountReason: null },
+
+    // Clearing a manual discount destroys nothing — it was free to apply.
+    // Clearing a loyalty redemption is different: real points were already
+    // spent for it, so removing it refunds them rather than losing them.
+    const redeemedPoints = pointsBehind(order);
+    await this.prisma.$transaction(async (tx) => {
+      if (redeemedPoints > 0) {
+        const visit = await tx.visit.findUniqueOrThrow({ where: { id: visitId }, select: { customerId: true } });
+        if (visit.customerId) {
+          await tx.customer.update({ where: { id: visit.customerId }, data: { loyaltyPoints: { increment: redeemedPoints } } });
+        }
+      }
+      await tx.order.update({
+        where: { id: order.id },
+        data: { discountType: null, discountValue: 0, discountReason: null },
+      });
     });
+
+    return this.recomputeTotals(order.id);
+  }
+
+  /**
+   * A redemption IS a discount — a FLAT one, worth `points *
+   * LOYALTY_POINT_VALUE`, applied through the exact same slot a manual
+   * discount uses (so it replaces one if there was one, same "one active
+   * rule at a time" rule). No separate ledger table: the points spent are
+   * just decremented off `Customer.loyaltyPoints` in the same transaction
+   * that applies the discount, so the two can never drift apart. Capped at
+   * both what the customer actually has and what the bill can absorb — a
+   * point that wouldn't have moved the total isn't spent.
+   */
+  async redeemLoyaltyPoints(visitId: string, requestedPoints: number) {
+    const order = await this.currentOpenOrder(visitId);
+    if (!order) throw new NotFoundException('No open order for this visit');
+    if (requestedPoints <= 0) throw new BadRequestException('Enter how many points to redeem');
+
+    const visit = await this.prisma.visit.findUniqueOrThrow({ where: { id: visitId }, select: { customerId: true } });
+    if (!visit.customerId) throw new BadRequestException('This visit has no customer to redeem points for');
+
+    // A second redemption call on the same order adds to the first rather
+    // than replacing it — unlike a manual discount (free to reapply), each
+    // call here has already spent real points, so overwriting the slot
+    // would silently burn that first call's balance for nothing.
+    const alreadyRedeemedPoints = pointsBehind(order);
+    const billTotal = order.subtotal + order.taxAmount;
+    const maxRedeemable = Math.max(0, Math.ceil(billTotal / LOYALTY_POINT_VALUE) - alreadyRedeemedPoints);
+
+    await this.prisma.$transaction(async (tx) => {
+      const customer = await tx.customer.findUniqueOrThrow({ where: { id: visit.customerId! } });
+      const points = Math.min(requestedPoints, customer.loyaltyPoints, maxRedeemable);
+      if (points <= 0) {
+        throw new BadRequestException(
+          customer.loyaltyPoints <= 0 ? 'This customer has no loyalty points to redeem' : 'Nothing left on this bill to redeem points against',
+        );
+      }
+      const totalPoints = alreadyRedeemedPoints + points;
+      await tx.customer.update({ where: { id: customer.id }, data: { loyaltyPoints: { decrement: points } } });
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          discountType: 'FLAT',
+          discountValue: totalPoints * LOYALTY_POINT_VALUE,
+          discountReason: `Loyalty redemption (${totalPoints} pts)`,
+        },
+      });
+    });
+
     return this.recomputeTotals(order.id);
   }
 

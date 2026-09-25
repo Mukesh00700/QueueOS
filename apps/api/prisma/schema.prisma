@@ -41,6 +41,8 @@ model Organization {
   invoices   Invoice[]
   events     QueueEvent[]
   shifts     Shift[]
+  suppliers      Supplier[]
+  purchaseOrders PurchaseOrder[]
 }
 
 model Branch {
@@ -69,6 +71,7 @@ model Branch {
   orders       Order[]
   invoices     Invoice[]
   shifts       Shift[]
+  purchaseOrders PurchaseOrder[]
   events       QueueEvent[]
   products     Product[]    @relation("ProductBranches")
 
@@ -197,6 +200,10 @@ model Customer {
   /// Accessibility and priority signals captured at check-in.
   isSeniorCitizen Boolean @default(false)
   needsAssistance Boolean @default(false)
+  /// Earned on every paid invoice (see OrderService's LOYALTY_EARN_RATE),
+  /// spent through the same discount mechanism a manual discount uses — a
+  /// redemption is just a FLAT discount, so there's no separate ledger.
+  loyaltyPoints Int @default(0)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -275,6 +282,7 @@ model Product {
   organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
   orderItems     OrderItem[]
   stockMovements StockMovement[]
+  purchaseOrderItems PurchaseOrderItem[]
   /// Empty = available at every branch (the default for every product
   /// today). Non-empty restricts it to just these — a seasonal or
   /// branch-exclusive item.
@@ -375,6 +383,9 @@ model Invoice {
   /// a discount rule changing later must not rewrite an invoice already out.
   discountAmount Float    @default(0)
   discountReason String?
+  /// Snapshotted at issue time for the receipt — the earn rate changing
+  /// later must not rewrite what an already-issued invoice actually paid out.
+  loyaltyPointsEarned Int @default(0)
   total          Float
   /// InvoiceStatus: ISSUED | VOID.
   status         String   @default("ISSUED")
@@ -477,6 +488,69 @@ model StockMovement {
   product Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
   @@index([productId, occurredAt])
+}
+
+// ---------------------------------------------------------------------------
+// Procurement — restocking a supplier actually shipped, not just a manual
+// count nudge (that's still ProductService.restock, unchanged, for the
+// casual case). Receiving a PurchaseOrder writes StockMovement rows the
+// same way a sale does — one more producer into the same ledger, not a
+// parallel stock concept.
+// ---------------------------------------------------------------------------
+
+model Supplier {
+  id             String  @id @default(cuid())
+  organizationId String
+  name           String
+  phone          String?
+  email          String?
+  notes          String?
+  createdAt      DateTime @default(now())
+
+  organization   Organization    @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  purchaseOrders PurchaseOrder[]
+
+  @@index([organizationId])
+}
+
+model PurchaseOrder {
+  id             String @id @default(cuid())
+  organizationId String
+  branchId       String
+  supplierId     String
+  /// PurchaseOrderStatus: OPEN | RECEIVED.
+  status         String    @default("OPEN")
+  notes          String?
+  /// Staff who created it. Plain id, no FK — same loose-actor convention as
+  /// QueueEvent.actorId.
+  createdBy      String?
+  createdAt      DateTime  @default(now())
+  receivedAt     DateTime?
+
+  organization Organization        @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  branch       Branch              @relation(fields: [branchId], references: [id], onDelete: Cascade)
+  supplier     Supplier            @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  items        PurchaseOrderItem[]
+
+  @@index([branchId, status])
+}
+
+model PurchaseOrderItem {
+  id              String @id @default(cuid())
+  purchaseOrderId String
+  /// Nullable and description/unitCost snapshotted at creation — same
+  /// reasoning as OrderItem: a product renamed or repriced later must not
+  /// rewrite a PO already placed.
+  productId       String?
+  description     String
+  quantity        Int
+  unitCost        Float
+  lineTotal       Float
+
+  purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
+  product       Product?      @relation(fields: [productId], references: [id], onDelete: SetNull)
+
+  @@index([purchaseOrderId])
 }
 
 // ---------------------------------------------------------------------------

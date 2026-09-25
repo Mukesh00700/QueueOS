@@ -103,8 +103,18 @@ export default function InvoicePage({ params }: { params: Promise<{ invoiceId: s
   const refundable = invoice.total - totalRefunded;
 
   return (
-    <div className="min-h-screen bg-surface text-fg">
-      <div className="mx-auto max-w-lg px-6 py-10 print:py-0">
+    <div className="min-h-screen bg-surface text-fg print:min-h-0">
+      {/* 80mm is the standard thermal receipt roll width — @page here is
+          what actually tells the print dialog/driver to use it instead of
+          A4/Letter; the print: utility classes below constrain the content
+          to fit inside it. Can't verify this against real thermal hardware
+          in this environment (none exists here) — this is the part of
+          "receipt printing" that's genuinely checkable without it: a real
+          browser's print-preview layout. Talking directly to a printer over
+          USB/serial (raw ESC-POS bytes) needs a physical device or at least
+          a printer-agent to target, so it's deliberately not built here. */}
+      <style>{'@media print { @page { size: 80mm auto; margin: 0; } }'}</style>
+      <div className="mx-auto max-w-lg px-6 py-10 print:max-w-[72mm] print:px-2 print:py-0 print:font-mono print:text-[11px]">
         <div className="flex items-center justify-between print:hidden">
           <Link
             href="/"
@@ -277,6 +287,10 @@ export default function InvoicePage({ params }: { params: Promise<{ invoiceId: s
               </>
             ) : null}
           </div>
+
+          {invoice.loyaltyPointsEarned > 0 ? (
+            <p className="mt-2 text-xs text-accent">Earned {invoice.loyaltyPointsEarned} loyalty pts</p>
+          ) : null}
 
           <div className="mt-5 space-y-1.5 border-t border-line pt-4">
             <p className="text-[11px] uppercase tracking-wide text-subtle">

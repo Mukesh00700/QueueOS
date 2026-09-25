@@ -4,7 +4,7 @@ import type { Counter, Token } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { EventBusService } from '../events/event-bus.service';
 import { QueueService } from '../queues/queue.service';
-import { OrderService } from '../products/order.service';
+import { LOYALTY_EARN_RATE, OrderService } from '../products/order.service';
 import { ProductService } from '../products/product.service';
 import { formatDisplayCode, minutesBetween, IN_LINE_ORDER } from '../queues/queue.util';
 import type { JwtPayload } from '../auth/auth.service';
@@ -144,6 +144,7 @@ export class CounterService {
             discountReason: order.discountReason,
             discountAmount: order.discountAmount,
             total: order.subtotal + order.taxAmount - order.discountAmount,
+            customerLoyaltyPoints: current?.customer?.loyaltyPoints ?? null,
             items: order.items.map((item) => ({
               id: item.id,
               productId: item.productId,
@@ -396,6 +397,14 @@ export class CounterService {
     return this.view(counterId, user);
   }
 
+  async redeemPoints(counterId: string, points: number, user?: JwtPayload) {
+    await this.requireCounter(counterId, user);
+    const token = await this.currentToken(counterId);
+    if (!token) throw new BadRequestException('No token is being served at this counter');
+    await this.orders.redeemLoyaltyPoints(token.visitId, points);
+    return this.view(counterId, user);
+  }
+
   /**
    * The payment-stage equivalent of `complete` — closing this stage out is
    * "payment recorded," not a staff button. Issues an Invoice off the
@@ -476,6 +485,11 @@ export class CounterService {
         data: { nextInvoiceNumber: { increment: 1 } },
         select: { nextInvoiceNumber: true },
       });
+      const total = subtotal + taxAmount - discountAmount;
+      // Earned on what was actually paid (after any discount, including a
+      // loyalty redemption — no double-dipping), only when there's a real
+      // customer on this visit to credit.
+      const pointsEarned = token.customerId ? Math.floor(total / LOYALTY_EARN_RATE) : 0;
       const invoice = await tx.invoice.create({
         data: {
           organizationId,
@@ -486,7 +500,8 @@ export class CounterService {
           taxAmount,
           discountAmount,
           discountReason,
-          total: subtotal + taxAmount - discountAmount,
+          loyaltyPointsEarned: pointsEarned,
+          total,
           status: 'ISSUED',
         },
       });
@@ -500,6 +515,9 @@ export class CounterService {
           recordedBy: actorId ?? null,
         })),
       });
+      if (pointsEarned > 0) {
+        await tx.customer.update({ where: { id: token.customerId! }, data: { loyaltyPoints: { increment: pointsEarned } } });
+      }
 
       return invoice;
     });

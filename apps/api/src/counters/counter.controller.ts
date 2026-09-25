@@ -7,10 +7,12 @@ import {
   addOrderItemSchema,
   discountSchema,
   recordPaymentSchema,
+  redeemPointsSchema,
   updateCounterSchema,
   type AddOrderItemDto,
   type DiscountDto,
   type RecordPaymentDto,
+  type RedeemPointsDto,
   type UpdateCounterDto,
 } from './counter.dto';
 
@@ -94,6 +96,15 @@ export class CounterController {
   @Delete(':id/discount')
   removeDiscount(@Param('id') id: string, @Req() req: AuthedRequest) {
     return this.counters.removeDiscount(id, req.user);
+  }
+
+  @Post(':id/loyalty/redeem')
+  redeemPoints(
+    @Param('id') id: string,
+    @Body(new ZodBody(redeemPointsSchema)) body: RedeemPointsDto,
+    @Req() req: AuthedRequest,
+  ) {
+    return this.counters.redeemPoints(id, body.points, req.user);
   }
 
   @Post(':id/provider')

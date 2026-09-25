@@ -6,14 +6,15 @@ import { useEffect, useState } from 'react';
 import {
   Activity,
   ArrowRight,
+  Building2,
   LayoutDashboard,
   LogOut,
   Monitor,
   QrCode,
   Sparkles,
 } from 'lucide-react';
-import { getVertical } from '@queueos/core';
-import { api, ApiError, setStoredToken, type BranchSummary } from '@/lib/api';
+import { ROLE_RANK, getVertical } from '@queueos/core';
+import { api, ApiError, setStoredToken, type AuthUser, type BranchSummary } from '@/lib/api';
 import { Card, Pill, Skeleton } from '@/components/ui';
 
 /**
@@ -28,6 +29,7 @@ import { Card, Pill, Skeleton } from '@/components/ui';
 export default function LauncherPage() {
   const router = useRouter();
   const [signedIn, setSignedIn] = useState<boolean | null>(null);
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [branches, setBranches] = useState<BranchSummary[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   // Distinguishes "the API process isn't running" (genuinely fix with `npm
@@ -39,8 +41,9 @@ export default function LauncherPage() {
   useEffect(() => {
     api
       .me()
-      .then(() => {
+      .then((u) => {
         setSignedIn(true);
+        setUser(u);
         return api.branches();
       })
       .then((b) => setBranches(b ?? null))
@@ -126,9 +129,19 @@ export default function LauncherPage() {
           <section className="mt-14">
             <div className="mb-4 flex items-baseline justify-between">
               <h2 className="text-sm font-semibold uppercase tracking-wider text-muted">Branches</h2>
-              {branches ? (
-                <span className="text-xs text-subtle">{branches.length} live</span>
-              ) : null}
+              <div className="flex items-center gap-3">
+                {user && ROLE_RANK[user.role as keyof typeof ROLE_RANK] >= ROLE_RANK.OWNER ? (
+                  <Link
+                    href="/organization"
+                    className="flex items-center gap-1 text-xs font-medium text-accent hover:underline"
+                  >
+                    <Building2 size={12} /> Org summary
+                  </Link>
+                ) : null}
+                {branches ? (
+                  <span className="text-xs text-subtle">{branches.length} live</span>
+                ) : null}
+              </div>
             </div>
 
             {error ? (

@@ -2,13 +2,14 @@ import { BadRequestException, Body, Controller, ForbiddenException, Get, NotFoun
 import { Prisma } from '@prisma/client';
 import { ROLE_RANK, VERTICALS, getVertical } from '@queueos/core';
 import { PrismaService } from '../prisma/prisma.service';
-import { QueueService } from '../queues/queue.service';
+import { QueueService, startOfToday } from '../queues/queue.service';
 import { provisionFlow } from '../queues/flow-provisioning';
 import { EventBusService } from '../events/event-bus.service';
 import { InsightsService } from '../insights/insights.service';
 import { CounterService } from '../counters/counter.service';
 import { InvoiceService } from '../products/invoice.service';
 import { ShiftService } from '../shifts/shift.service';
+import { ProcurementService } from '../procurement/procurement.service';
 import { formatDisplayCode } from '../queues/queue.util';
 import { MinRole, Public, type AuthedRequest } from '../auth/auth.guard';
 import type { JwtPayload } from '../auth/auth.service';
@@ -28,6 +29,7 @@ export class BranchController {
     private readonly counterService: CounterService,
     private readonly invoiceService: InvoiceService,
     private readonly shiftService: ShiftService,
+    private readonly procurement: ProcurementService,
   ) {}
 
   /**
@@ -271,6 +273,36 @@ export class BranchController {
   async invoices(@Param('id') id: string, @Query('limit') limit: string | undefined, @Req() req: AuthedRequest) {
     await this.requireBranchScope(id, req.user!);
     return this.invoiceService.listForBranch(id, Math.min(200, Number(limit) || 50));
+  }
+
+  /** Defaults to today — an explicit ISO `since` shows a longer window. */
+  @MinRole('ADMIN')
+  @Get('branches/:id/staff-performance')
+  async staffPerformance(@Param('id') id: string, @Query('since') since: string | undefined, @Req() req: AuthedRequest) {
+    await this.requireBranchScope(id, req.user!);
+    const sinceDate = since ? new Date(since) : startOfToday();
+    if (Number.isNaN(sinceDate.getTime())) throw new BadRequestException('Invalid `since` date');
+    return this.invoiceService.staffPerformance(id, sinceDate);
+  }
+
+  /**
+   * Every branch's revenue side by side — the one cross-branch view in the
+   * product. OWNER-only: an ADMIN is already confined to their own branch
+   * everywhere else, and this route has no `:id` to scope down to one.
+   */
+  @MinRole('OWNER')
+  @Get('branches/summary')
+  async branchesSummary(@Query('since') since: string | undefined, @Req() req: AuthedRequest) {
+    const sinceDate = since ? new Date(since) : startOfToday();
+    if (Number.isNaN(sinceDate.getTime())) throw new BadRequestException('Invalid `since` date');
+    return this.invoiceService.orgSummary(req.user!.organizationId, sinceDate);
+  }
+
+  @MinRole('ADMIN')
+  @Get('branches/:id/purchase-orders')
+  async purchaseOrders(@Param('id') id: string, @Query('limit') limit: string | undefined, @Req() req: AuthedRequest) {
+    await this.requireBranchScope(id, req.user!);
+    return this.procurement.listPurchaseOrders(id, Math.min(200, Number(limit) || 50));
   }
 
   /** Counters for a branch, used by the setup page and the counter picker on the tablet. */

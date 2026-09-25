@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, NotFoundException } from '@nestjs/common';
 import { ROLE_RANK } from '@queueos/core';
 import { PrismaService } from '../prisma/prisma.service';
+import { startOfToday } from '../queues/queue.service';
 import type { JwtPayload } from '../auth/auth.service';
 import type { RefundDto } from './invoice.dto';
 
@@ -116,6 +117,108 @@ export class InvoiceService {
         recordedBy: user.sub,
       },
     });
+  }
+
+  /**
+   * Every branch's revenue side by side — the one view that's been missing
+   * all engagement, since Invoices/Shifts/Staff-performance are all
+   * deliberately branch-scoped (an ADMIN only ever sees their own branch).
+   * Plain JS aggregation over full invoice rows rather than a `groupBy`,
+   * because `refunds` only lives on `Refund` via the `invoice` relation —
+   * Prisma's `groupBy` can't group across a relation, and at this scale
+   * (a small business's branches) fetching and reducing in JS costs
+   * nothing worth avoiding it for.
+   */
+  async orgSummary(organizationId: string, since: Date) {
+    const [branches, invoices] = await Promise.all([
+      this.prisma.branch.findMany({
+        where: { organizationId },
+        select: { id: true, name: true },
+        orderBy: { name: 'asc' },
+      }),
+      this.prisma.invoice.findMany({
+        where: { organizationId, createdAt: { gte: since } },
+        select: { branchId: true, total: true, discountAmount: true, status: true, refunds: { select: { amount: true } } },
+      }),
+    ]);
+
+    return branches.map((branch) => {
+      const active = invoices.filter((inv) => inv.branchId === branch.id && inv.status !== 'VOID');
+      const revenue = active.reduce((sum, inv) => sum + inv.total, 0);
+      const refunded = active.reduce((sum, inv) => sum + inv.refunds.reduce((s, r) => s + r.amount, 0), 0);
+      return {
+        branchId: branch.id,
+        branchName: branch.name,
+        invoiceCount: active.length,
+        revenue,
+        discountGiven: active.reduce((sum, inv) => sum + inv.discountAmount, 0),
+        refunded,
+        netRevenue: revenue - refunded,
+      };
+    });
+  }
+
+  /**
+   * Per-staff activity since `since` — three cleanly attributable facts,
+   * not a computed payout: items rung up (`OrderItem.staffUserId`, scoped
+   * to lines whose order actually got invoiced — a cart line that was
+   * removed or never paid earns nothing), payments personally recorded
+   * (`Payment.recordedBy`), and refunds personally processed
+   * (`Refund.recordedBy`). Deliberately doesn't net refunds against the
+   * original seller's revenue — a refund has no OrderItem-level link back
+   * to which line it covers (it's recorded against the whole invoice), so
+   * there's no honest way to attribute it to the original sale.
+   */
+  async staffPerformance(branchId: string, since: Date) {
+    const [items, payments, refunds] = await Promise.all([
+      this.prisma.orderItem.groupBy({
+        by: ['staffUserId'],
+        where: { staffUserId: { not: null }, order: { branchId, invoice: { createdAt: { gte: since } } } },
+        _sum: { lineTotal: true },
+        _count: { id: true },
+      }),
+      this.prisma.payment.groupBy({
+        by: ['recordedBy'],
+        where: { recordedBy: { not: null }, recordedAt: { gte: since }, invoice: { branchId } },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+      this.prisma.refund.groupBy({
+        by: ['recordedBy'],
+        where: { recordedBy: { not: null }, recordedAt: { gte: since }, invoice: { branchId } },
+        _sum: { amount: true },
+        _count: { id: true },
+      }),
+    ]);
+
+    const staffIds = new Set<string>();
+    for (const i of items) if (i.staffUserId) staffIds.add(i.staffUserId);
+    for (const p of payments) if (p.recordedBy) staffIds.add(p.recordedBy);
+    for (const r of refunds) if (r.recordedBy) staffIds.add(r.recordedBy);
+
+    const staff = await this.prisma.staffUser.findMany({
+      where: { id: { in: [...staffIds] } },
+      select: { id: true, name: true },
+    });
+    const nameOf = new Map(staff.map((s) => [s.id, s.name]));
+
+    return [...staffIds]
+      .map((id) => {
+        const item = items.find((i) => i.staffUserId === id);
+        const payment = payments.find((p) => p.recordedBy === id);
+        const refund = refunds.find((r) => r.recordedBy === id);
+        return {
+          staffId: id,
+          name: nameOf.get(id) ?? 'Unknown staff',
+          itemsSold: item?._count.id ?? 0,
+          revenue: item?._sum.lineTotal ?? 0,
+          paymentsRecorded: payment?._count.id ?? 0,
+          cashHandled: payment?._sum.amount ?? 0,
+          refundsProcessed: refund?._count.id ?? 0,
+          refundAmount: refund?._sum.amount ?? 0,
+        };
+      })
+      .sort((a, b) => b.revenue - a.revenue);
   }
 
   /** Same shape as every other back-office read: own org, and own branch unless Owner. */

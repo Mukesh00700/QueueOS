@@ -33,6 +33,12 @@ export const discountSchema = z
 
 export type DiscountDto = z.infer<typeof discountSchema>;
 
+export const redeemPointsSchema = z.object({
+  points: z.number().int().positive().max(1_000_000),
+});
+
+export type RedeemPointsDto = z.infer<typeof redeemPointsSchema>;
+
 export const addOrderItemSchema = z.object({
   productId: z.string().trim().min(1),
   quantity: z.number().int().min(1).max(999).default(1),
