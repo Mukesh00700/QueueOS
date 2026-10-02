@@ -16,11 +16,20 @@ export default function QueueDetailPage({ params }: { params: Promise<{ queueId:
   const { data, error, refresh, live } = useLive(queueId, () => api.queueDisplay(queueId), {
     queueIds: [queueId],
   });
+  const { vertical, setVertical } = useTheme();
+
+  // Set as soon as the queue's real vertical is known, and the skeleton
+  // stays up until it's actually taken effect — otherwise there's a beat
+  // where real data renders under the previous (or default hospital)
+  // vertical's wording.
+  useEffect(() => {
+    if (data) setVertical(data.vertical);
+  }, [data?.vertical, setVertical]);
 
   if (error) {
     return <div className="grid min-h-screen place-items-center bg-surface p-6 text-danger">{error}</div>;
   }
-  if (!data) {
+  if (!data || vertical.id !== data.vertical) {
     return (
       <div className="space-y-4 p-6">
         <Skeleton className="h-16" />
@@ -41,15 +50,11 @@ function QueueDetail({
   onChange: () => void;
   live: boolean;
 }) {
-  const { t, vertical, setVertical } = useTheme();
+  const { t, vertical } = useTheme();
   const { queue } = data;
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [siblingQueues, setSiblingQueues] = useState<QueueConfig[]>([]);
-
-  useEffect(() => {
-    setVertical(data.vertical);
-  }, [data.vertical, setVertical]);
 
   useEffect(() => {
     api

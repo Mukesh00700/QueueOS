@@ -448,6 +448,12 @@ export class TokenService {
   async submitFeedback(code: string, rating: number, comment?: string) {
     const token = await this.prisma.token.findUnique({ where: { code }, include: { queue: true } });
     if (!token) throw new NotFoundException('Token not found');
+    // The web app already only shows this form once a visit is COMPLETED —
+    // enforced here too rather than trusted to the client, same as every
+    // other status-dependent action in this codebase.
+    if (token.status !== 'COMPLETED') {
+      throw new BadRequestException('Feedback can only be left after the visit is completed');
+    }
 
     await this.prisma.feedback.upsert({
       where: { tokenId: token.id },

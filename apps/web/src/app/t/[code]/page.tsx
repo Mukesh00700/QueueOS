@@ -37,12 +37,22 @@ export default function TokenPage({ params }: { params: Promise<{ code: string }
     queueId ? { queueIds: [queueId] } : {},
     { pollMs: 15_000 },
   );
+  const { vertical, setVertical } = useTheme();
 
   // The public code intentionally does not expose the internal token id, so the
   // subscription rides the queue room instead — the same events, no id leak.
   useEffect(() => {
     if (data && data.queue.id !== queueId) setQueueId(data.queue.id);
   }, [data, queueId]);
+
+  // Set as soon as the token's real vertical is known, and the skeleton
+  // stays up until it's actually taken effect — otherwise there's a beat
+  // where real data renders under the previous (or default hospital)
+  // vertical's wording, e.g. this customer's own journey trail showing the
+  // wrong stage names for a moment.
+  useEffect(() => {
+    if (data) setVertical(data.vertical);
+  }, [data?.vertical, setVertical]);
 
   if (error) {
     return (
@@ -56,7 +66,7 @@ export default function TokenPage({ params }: { params: Promise<{ code: string }
     );
   }
 
-  if (!data) {
+  if (!data || vertical.id !== data.vertical) {
     return (
       <div className="mx-auto max-w-md space-y-4 p-6">
         <Skeleton className="h-20" />
@@ -71,12 +81,8 @@ export default function TokenPage({ params }: { params: Promise<{ code: string }
 const TERMINAL = ['COMPLETED', 'CANCELLED', 'NO_SHOW'];
 
 function TokenView({ token, onChange }: { token: TokenStatusResponse; onChange: () => void }) {
-  const { t, vertical, setVertical } = useTheme();
+  const { t, vertical } = useTheme();
   const [busy, setBusy] = useState(false);
-
-  useEffect(() => {
-    setVertical(token.vertical);
-  }, [token.vertical, setVertical]);
 
   const stageIndex = journeyIndex(token);
   const eta = token.eta;

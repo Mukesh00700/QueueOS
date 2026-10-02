@@ -1,13 +1,15 @@
 'use client';
 
 import { use, useEffect, useState, type FormEvent } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Wallet } from 'lucide-react';
+import { ChevronRight, Wallet } from 'lucide-react';
 import { ROLE_RANK } from '@queueos/core';
 import { api, ApiError, type AuthUser, type BranchSummary, type ShiftRow } from '@/lib/api';
 import { AppShell } from '@/components/app-shell';
 import { Button, Card, CardHeader, EmptyState, Pill, Skeleton } from '@/components/ui';
-import { formatClock, formatDate, timeAgo } from '@/lib/utils';
+import { formatClock, formatDate } from '@/lib/utils';
+import { dayKey, mergeNonCash, nonCashSummary } from './shift-row';
 
 const INPUT =
   'h-11 w-full rounded-xl border border-line bg-raised px-3.5 text-sm outline-none transition-colors focus:border-accent';
@@ -99,6 +101,15 @@ export default function ShiftsPage({ params }: { params: Promise<{ branchId: str
   }
   if (!user) return null;
 
+  const dayGroups = new Map<string, { displayDate: string; shifts: ShiftRow[] }>();
+  for (const shift of history ?? []) {
+    if (!shift.closedAt) continue;
+    const key = dayKey(shift.closedAt);
+    const group = dayGroups.get(key);
+    if (group) group.shifts.push(shift);
+    else dayGroups.set(key, { displayDate: formatDate(new Date(shift.closedAt)), shifts: [shift] });
+  }
+
   const canManage = ROLE_RANK[user.role as keyof typeof ROLE_RANK] >= ROLE_RANK.ADMIN;
   if (!canManage) {
     return (
@@ -152,6 +163,12 @@ export default function ShiftsPage({ params }: { params: Promise<{ branchId: str
                   <p className="tnum mt-1 text-lg font-semibold">₹{current.expectedCash.toFixed(2)}</p>
                 </div>
               </div>
+              {nonCashSummary(current.nonCash) ? (
+                <div className="mb-4 rounded-xl border border-line bg-raised p-3 text-sm">
+                  <p className="text-[11px] uppercase tracking-wide text-subtle">Non-cash today</p>
+                  <p className="tnum mt-1">{nonCashSummary(current.nonCash)}</p>
+                </div>
+              ) : null}
               <form onSubmit={submitClose} className="space-y-3">
                 <label className="block">
                   <span className="mb-1.5 block text-sm font-medium">Counted cash</span>
@@ -207,32 +224,33 @@ export default function ShiftsPage({ params }: { params: Promise<{ branchId: str
             icon={<Wallet size={16} />}
           />
           <div className="divide-y divide-line">
-            {(history ?? []).length === 0 ? (
+            {dayGroups.size === 0 ? (
               <EmptyState title="No shifts closed yet" detail="One appears here once a shift is closed out." />
             ) : (
-              (history ?? []).map((shift) => {
-                const variance = shift.variance ?? 0;
-                const settled = Math.abs(variance) < 0.01;
+              Array.from(dayGroups.entries()).map(([date, group]) => {
+                const totalVariance = group.shifts.reduce((sum, s) => sum + (s.variance ?? 0), 0);
+                const settled = Math.abs(totalVariance) < 0.01;
+                const nonCash = nonCashSummary(mergeNonCash(group.shifts));
                 return (
-                  <div key={shift.id} className="flex items-center justify-between gap-4 px-5 py-4">
+                  <Link
+                    key={date}
+                    href={`/dashboard/${branchId}/shifts/${date}`}
+                    className="flex items-center justify-between gap-4 px-5 py-4 transition-colors hover:bg-raised"
+                  >
                     <div className="min-w-0">
-                      <p className="truncate text-sm font-semibold">
-                        {shift.closedAt ? formatDate(new Date(shift.closedAt)) : '—'}
-                      </p>
+                      <p className="truncate text-sm font-semibold">{group.displayDate}</p>
                       <p className="truncate text-xs text-muted">
-                        {shift.closedAt ? timeAgo(shift.closedAt) : ''} · float ₹{shift.openingCash.toFixed(2)}
+                        {group.shifts.length} shift{group.shifts.length === 1 ? '' : 's'}
                       </p>
+                      {nonCash ? <p className="truncate text-xs text-subtle">{nonCash}</p> : null}
                     </div>
                     <div className="flex shrink-0 items-center gap-3 text-right">
-                      <div>
-                        <p className="text-xs text-subtle">Expected ₹{shift.expectedCash.toFixed(2)}</p>
-                        <p className="text-xs text-subtle">Counted ₹{(shift.countedCash ?? 0).toFixed(2)}</p>
-                      </div>
-                      <Pill tone={settled ? 'success' : variance > 0 ? 'accent' : 'danger'}>
-                        {settled ? 'Settled' : `${variance > 0 ? '+' : '−'}₹${Math.abs(variance).toFixed(2)}`}
+                      <Pill tone={settled ? 'success' : totalVariance > 0 ? 'accent' : 'danger'}>
+                        {settled ? 'Settled' : `${totalVariance > 0 ? '+' : '−'}₹${Math.abs(totalVariance).toFixed(2)}`}
                       </Pill>
+                      <ChevronRight size={16} className="text-subtle" />
                     </div>
-                  </div>
+                  </Link>
                 );
               })
             )}

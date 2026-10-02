@@ -22,6 +22,380 @@ approach over a plausible alternative, does.
 
 ---
 
+## 2026-10-02 — Track non-cash sales per shift, fix mislabeled "cash handled" metric
+
+**Decision:** Asked whether UPI/card/wallet sales get tracked anywhere —
+they were being recorded (every `Payment` row always had its `method`),
+but nothing ever read that field back except the CASH-only shift
+reconciliation, so there was no view of "how much came in on each rail
+today." Two changes:
+
+1. `ShiftService` (`apps/api/src/shifts/shift.service.ts`) replaces its
+   two CASH-filtered `aggregate()` calls with one `groupBy(['method'])`
+   over `Payment`/`Refund` for the shift's window — the same query now
+   derives both the existing `expectedCash` (the `CASH` entry) and a new
+   `nonCash: Record<string, number>` breakdown (net of refunds) for
+   every other method, returned from `current()`, `history()`, and
+   `close()`. No new query, no schema change — same cost as before, more
+   out of it. Card/UPI/wallet get no "counted vs. expected" variance
+   (there's no physical drawer to count against; the bank/gateway
+   statement is the real source of truth for those), just a visible
+   total — surfaced as a "Non-cash today" tile on the open-shift card, a
+   line on every closed-shift row, and a same-day merge on the
+   day-summary rows, all via two small helpers in `shift-row.tsx`
+   (`nonCashSummary`, `mergeNonCash`) shared across the three views so
+   they can't disagree.
+2. Found while tracing payment aggregation: Staff Performance's
+   `cashHandled` field (`invoice.service.ts`'s `staffPerformance()`) was
+   mislabeled — it sums `Payment.amount` with no `method` filter at all,
+   i.e. it's every payment method a staffer recorded, not specifically
+   cash. Renamed to `amountCollected` end to end (API field, the
+   `StaffPerformanceRow` type, the table column) rather than leave a
+   money metric with a name that lies about what it measures.
+
+**Reason:** The data was never lost (every `Payment.method` was always
+written correctly), it just had no reporting surface — an admin
+reconciling a shift had no way to see non-cash takings without opening
+every invoice. Reusing the existing per-shift window query to add this
+is the cheapest version that's actually useful; a per-method "counted"
+variance would be fake precision since nothing physical backs a UPI
+total the way a drawer backs cash.
+
+**Impact:** `apps/api/src/shifts/shift.service.ts`,
+`apps/api/src/products/invoice.service.ts` (rename only),
+`apps/web/src/lib/api.ts` (`ShiftRow.nonCash`, `StaffPerformanceRow.amountCollected`),
+`apps/web/src/app/dashboard/[branchId]/shifts/{page.tsx,shift-row.tsx}`,
+`apps/web/src/app/dashboard/[branchId]/staff-performance/page.tsx`. No
+schema change. Verified live at Burger Junction: after a ₹417.90 CARD
+sale, the open shift's "Non-cash today" tile read exactly "Card
+₹417.90"; the Sept-23 day-group row (seeded data with a ₹90 card sale)
+showed "Card ₹90.00" at both the day-summary and the individual-shift
+level; Staff Performance's renamed "Amount collected" column rendered
+correctly. `test-flow.sh` clean, both workspaces typecheck clean.
+
+---
+
+## 2026-10-02 — Cap cash/card tenders at the bill, surface change due, group shift history by day
+
+**Decision:** Two related fixes to cash-drawer tracking, both flagged
+while reviewing the Shifts page:
+
+1. `recordPayment()` in both `apps/web/src/app/counter/[counterId]/page.tsx`
+   and `apps/api/src/counters/counter.service.ts` now caps what actually
+   gets written to `Payment.amount` at the remaining balance, regardless
+   of what staff type into the amount field. The frontend caps the
+   completing tender at `remainingBalance` and, for CASH only, shows the
+   excess as "— give back ₹X change" in the success message (card/UPI/
+   wallet have no physical change to hand back, so the cap still applies
+   there but the wording doesn't). The backend repeats the same cap
+   independently on the last tender line before writing `Payment` rows,
+   so `sum(Payment.amount)` can never exceed `invoice.total` no matter
+   what a client sends — this codebase's established pattern (same as
+   the discount and cart-safety checks) of never trusting a money
+   invariant to the UI alone.
+2. The Shifts page's "Past shifts" list (`apps/web/src/app/dashboard/[branchId]/shifts/page.tsx`)
+   now groups closed shifts by calendar day instead of rendering one row
+   per shift — each day row shows the shift count and a summed variance,
+   and links to a new `.../shifts/[date]/page.tsx` that lists just that
+   day's individual shifts. Both pages share one `ShiftHistoryRow`
+   component (`shifts/shift-row.tsx`) so they can't render a shift
+   differently from each other, and a `dayKey()` helper groups by local
+   calendar day (matching what `formatDate` displays) rather than UTC day,
+   so a late-night shift doesn't appear to switch days between the two
+   views.
+
+**Reason:** Staff naturally type what a customer physically handed over
+(₹1000 for an ₹800 bill) rather than mentally subtracting first; without
+a cap, that got recorded as the sale verbatim, inflating everything that
+sums payments — Shifts' expected cash, Staff Performance's cash handled
+— by the change that actually left the drawer. Separately, a business
+that closes a shift at every staff changeover was about to bury the
+shift history in a flat, ever-growing list.
+
+**Impact:** `apps/web/src/app/counter/[counterId]/page.tsx`,
+`apps/api/src/counters/counter.service.ts`,
+`apps/web/src/app/dashboard/[branchId]/shifts/page.tsx` (changed); new
+`apps/web/src/app/dashboard/[branchId]/shifts/[date]/page.tsx` and
+`apps/web/src/app/dashboard/[branchId]/shifts/shift-row.tsx`. No schema
+change. Verified live end-to-end at Burger Junction: a ₹835.80 cart
+tendered ₹1000 CASH recorded ₹835.80, flashed "give back ₹164.20
+change", and the open shift's expected cash increased by exactly
+₹835.80 (not ₹1000); a ₹417.90 cart tendered ₹500 CARD capped to
+₹417.90 with no change wording; a split-tender sale (₹200 CASH banked,
+then ₹300 CASH against the ₹217.90 remaining) capped only the second
+line to ₹217.90 ("give back ₹82.10 change") while the first ₹200 line
+was untouched — confirmed via the shift's expected cash landing at
+exactly ₹2253.70 (₹1000 float + ₹835.80 + ₹200 + ₹217.90). Shift
+grouping verified against existing seeded data: two shifts closed on
+the same day collapsed into one day row (2 shifts, −₹5.00 combined
+variance), and the drill-down page showed both at their original
+individual figures (+₹5.00 and −₹10.00).
+
+---
+
+## 2026-09-29 — Auto-create a counter per queue at provisioning time
+
+**Decision:** `provisionFlow` (`apps/api/src/queues/flow-provisioning.ts`)
+now creates one `Counter` alongside each `Queue` it provisions, named
+after the queue itself (`Main Queue` → counter `Main Queue`, `Payment` →
+counter `Payment`). Fixed in this one shared function rather than at
+either caller, since both `auth.service.ts` (registration) and
+`branch.controller.ts` (adding a new branch to an existing org) already
+route through it — one change closes the gap for both.
+
+**Reason:** Flagged during the extensive QA pass, fixed now: a freshly
+registered business had queues but zero counters, despite the
+registration page's own copy promising "one branch already set up" — the
+owner had to manually add a counter in Setup before the branch could
+serve anyone at all. Small, cheap, no reason not to fix once flagged.
+
+**Impact:** `apps/api/src/queues/flow-provisioning.ts` only — no schema
+change, no DTO, no frontend change (Setup's counters list and the
+counter tablet already just read whatever counters exist). Verified
+live: registered a fresh QSR-template business and confirmed via `GET
+/branches/:id/counters` that all three counters (Ordering, Payment,
+Pickup) now exist, each correctly named after and assigned to its own
+queue; separately created a second branch on that same org via `POST
+/branches` with a template, confirming the other call site is fixed too;
+opened the new Payment counter directly in the browser right after
+registration with zero manual setup and confirmed it's immediately
+usable — the CASH/CARD/UPI/WALLET buttons and "Next guest" all render
+correctly, exactly as if a human had configured it by hand. `npm run
+typecheck` and `test-flow.sh` clean.
+
+---
+
+## 2026-09-26 — Fix: payment could be skipped entirely at a real payment-stage counter via "Next"
+
+**Decision:** Replaced `requireNoUnpaidCart` with `requireResolvedBeforeCompleting(visitId,
+queueId)`, called from all three ways a token can leave SERVING without
+going through `recordPayment` (`complete`, and the auto-complete `next`/
+`callSpecific` do on whoever the counter already holds). Two rules now,
+not one:
+
+1. **A `PAYMENT`-stage queue always requires an explicit payment**,
+   regardless of cart state — previously only the explicit Complete
+   button checked `stageType === 'PAYMENT'`; `next`/`callSpecific` never
+   did. Pressing NEXT at a real Payment Counter, instead of tapping a
+   tender button, silently skipped payment entirely — a live token
+   completed with zero invoice, zero warning, at Burger Junction's actual
+   Payment Counter (not a template edge case).
+2. **Off a payment stage, an unpaid cart only blocks completion if this
+   is the last stage** — no `nextQueueId` means the Visit closes right
+   here (see `AutoAdvanceService`), so an unpaid cart really would be
+   gone for good, same as the fix earlier today. But if there **is** a
+   next stage, the cart is fine to carry forward on the same `Order` —
+   completing this stage just advances the visit, it doesn't end it.
+   Discovered this refinement was needed testing a **second** fresh
+   business (a multi-stage Retail flow, Trial Room → Payment): the
+   morning's fix was too strict and blocked the entirely legitimate case
+   of ringing up what a shopper's buying while still in the fitting
+   room, then handing off to Payment to actually collect it.
+
+**Reason:** Found continuing today's testing pass into a genuinely
+different flow shape (multi-stage, not single-queue) — proof that
+testing more scenarios, not just more verticals, kept finding real gaps
+in the same feature. Rule 1 in particular is a **pre-existing** gap, not
+introduced by today's earlier fixes — it's been possible to skip payment
+via NEXT since `recordPayment` and `next` were both first written.
+
+**Impact:** `apps/api/src/counters/counter.service.ts`
+(`requireResolvedBeforeCompleting` replaces `requireNoUnpaidCart`; all
+three call sites now pass the counter's `queueId`). Verified live, all
+three scenarios: (1) at Burger Junction's real Payment Counter, holding
+a customer with an empty ad-hoc cart, confirmed NEXT is now correctly
+blocked (`HTTP 400`, "This is a payment stage..."), then confirmed
+recording payment first and pressing NEXT again both succeed normally;
+(2) registered a **second** fresh business ("Trendy Threads," Retail
+vertical, the "Apparel retail: Trial Room → Payment" template — a
+genuinely different multi-stage shape from anything tested before today)
+and confirmed completing the Trial Room stage with a real ₹1499 jacket in
+the cart now correctly **succeeds** (previously blocked by the morning's
+first-pass fix) and the cart correctly carries forward — the shopper
+auto-advanced into Payment still holding the jacket, payment was
+recorded there, and a real invoice issued (`INV-1`, ₹1678.88 with GST);
+(3) re-confirmed the original single-queue salon scenario (no next
+stage) still correctly blocks completing with an unpaid cart. `npm run
+typecheck` and `test-flow.sh` (including its own `call-specific` case)
+clean throughout.
+
+---
+
+## 2026-09-26 — Fix: every vertical-aware page briefly rendered the wrong terminology
+
+**Decision:** `ThemeProvider` defaults to the `hospital` vertical and is
+mounted once at the root layout — every branch-specific page (dashboard,
+counter, checkin, queue detail, lobby display, customer token status)
+corrects this itself via `useEffect(() => setVertical(realVertical),
+[realVertical])` once its own data loads. That correction is
+asynchronous relative to the render that data arrives in, so there was
+always one render where real data (a real wait count, a real customer
+name) painted under the *previous* vertical's words — on a fresh page
+load, `hospital`'s, e.g. "3 patients in line" on a salon's dashboard,
+"Next patient" on its counter tablet.
+
+Fixed the same way in all six files rather than restructuring how
+terminology is read: each page's top-level component now also calls
+`setVertical` (previously only the child that renders content did) and
+extends its existing loading gate from `!data` to `!data ||
+vertical.id !== data.vertical` (the exact field name varies — e.g.
+`data.stats.vertical` on the dashboard, checked per file). The skeleton
+that was already there for the network fetch now also covers the one
+extra render the theme correction needs, so real content never paints
+under the wrong words — it goes skeleton → correct content, never
+skeleton → wrong content → correct content. The child component's own
+`setVertical` effect was removed (redundant once the parent owns it) but
+its `t`/`vertical` reads for rendering are untouched.
+
+Considered restructuring every page to read terminology via a local
+`getVertical(realVertical)` call instead of the shared context, avoiding
+the async correction entirely — the more "architecturally correct" fix,
+but it means touching every place `t.customer` etc. is read (many more
+call sites than the six files actually touched here) for a problem this
+smaller, lower-risk change fully solves.
+
+**Reason:** Documented as a known issue in this session's earlier testing
+pass (self-correcting, ~1–3s, systemic across every page) rather than
+fixed immediately, since it touches six files across the whole app and
+deserved a deliberate pass rather than a rushed one mid-sweep. Continuing
+that sweep.
+
+**Impact:** `apps/web/src/app/{checkin/[branchId],counter/[counterId],
+dashboard/[branchId],display/[queueId],queues/[queueId],t/[code]}/page.tsx`
+— same pattern in all six. Verified live: navigated fresh (hard
+navigation, so `ThemeProvider` genuinely remounts at its `hospital`
+default) to the salon business's dashboard and counter tablet and
+checked page text within 0.5–1s of navigating — both rendered fully
+correct salon terminology on the very first non-empty read, no
+intermediate "patient"/"NOW SERVING" wording captured (previously this
+took 1.5–3s to settle and the wrong wording *was* visible in between);
+confirmed zero regression on Apollo Hospital's dashboard, whose own
+correct vertical happens to match the default (so this run mainly
+confirms the mechanism didn't break, not that the race is gone — the
+salon run is the real proof of the fix). `npm run typecheck` and
+`test-flow.sh` clean.
+
+---
+
+## 2026-09-25 — Fix: "Kitchen" nav item shown for every vertical, not just Restaurant
+
+**Decision:** Gated the "Kitchen" sidebar link to `vertical.id ===
+'restaurant'`. The route (`/kitchen/[branchId]`) and its API are
+untouched and still reachable by URL — this only stops it from being
+surfaced in nav where it doesn't apply.
+
+**Reason:** Found in the same testing pass — opened Kitchen for the
+salon business and saw a real completed appointment ("Riya Sharma —
+Haircut & Styling") sitting under a big "QUEUED" tag on a screen titled
+"Kitchen," 6 tickets deep, none of them food. `kitchenStatus` tracking
+(`OrderItem.kitchenStatus`, QUEUED → PREPARING → READY) is genuinely
+restaurant-specific — a stylist, a nurse, a priest, or a retail cashier
+has no reason to walk a sale through a prep pipeline. Unlike Invoices or
+Shifts (financial concepts that apply to any vertical, correctly shown
+everywhere), Kitchen's whole premise — "food being cooked" — doesn't
+generalize, so hiding it is the right fix rather than relabeling it.
+
+**Impact:** `apps/web/src/components/app-shell.tsx` (nav item gated
+behind `vertical.id === 'restaurant'`). Verified live: confirmed the link
+is now absent from the salon business's sidebar (`find` returns no
+matches for "Kitchen") and still present for Burger Junction (restaurant
+vertical, correctly unaffected). `npm run typecheck` and `test-flow.sh`
+clean.
+
+---
+
+## 2026-09-25 — Fix: feedback could be submitted on a token that never finished
+
+**Decision:** `TokenService.submitFeedback` now rejects any token whose
+status isn't `COMPLETED`. Server-side only — the web app's `/t/[code]`
+page already gates the feedback form to `status === 'COMPLETED'`, so this
+was never reachable through the real product UI, only by calling the API
+directly.
+
+**Reason:** Found in the same testing pass as the cart-discarding
+Complete bug above — the API let feedback be left (and, via the existing
+upsert, silently overwritten) against a token still `WAITING`, or even
+`CANCELLED`, with zero status check at all. Low real-world severity given
+the UI already prevents it, but every other status-dependent action in
+this codebase enforces its own invariant server-side rather than trusting
+the client (cancel already refuses an already-closed token the same way)
+— this was the one gap in that pattern.
+
+**Impact:** `apps/api/src/tokens/token.service.ts` (`submitFeedback`).
+Verified live: confirmed the gap first (`rating:5` accepted, `HTTP 201`,
+on a token that had never even been called), then confirmed the fix
+correctly rejects it (`HTTP 400`, "Feedback can only be left after the
+visit is completed") while a genuine post-completion submission still
+works. `npm run typecheck` and `test-flow.sh` clean (feedback isn't
+covered by that script, confirmed via grep — this fix relies on the
+direct live verification above, not the smoke test).
+
+---
+
+## 2026-09-25 — Fix: a cart could be silently discarded on any non-payment-stage counter
+
+**Decision:** `CounterService.recordPayment` was gated to `queue.stageType
+=== 'PAYMENT'` only; `complete` had no cart awareness at all. Loosened
+both, symmetrically: `recordPayment` is now also allowed off a payment
+stage whenever the visit's cart has real items (still refused on an empty
+cart off a payment stage — nothing to charge for, and the ad-hoc
+"type an amount" fallback only makes sense on a dedicated payment stage);
+`complete` now refuses to close out a token whose cart has items,
+pointing staff at recording a payment instead. The web counter page
+mirrors this: the CASH/CARD/UPI/WALLET buttons now render whenever the
+cart is non-empty, not only when `stageType === 'PAYMENT'` — a plain
+Complete button only shows when there's genuinely nothing to charge for.
+
+**Reason:** Found live, testing a brand-new business end to end (the
+whole point of this testing pass) — registered "Glamour Cuts Salon" on
+the **default** "Single queue" template (the registration page's own
+words: "today's default. Right for a clinic, salon, or simple counter"),
+which provisions one `DEPARTMENT`-stageType queue with no `PAYMENT` stage
+at all. The counter's cart/tap-to-add UI is fully present regardless of
+stage ("a counter already is the POS terminal," true since Phase 8) —
+but tapping the *only* available action, Complete, on a real ₹354 cart
+silently closed the appointment with **zero warning and zero invoice**.
+Confirmed via `GET /branches/:id/invoices` returning `[]` after
+"Appointment completed" showed on screen. This isn't an edge case: it's
+the default onboarding path for two of six verticals (Hospital, Salon
+both ship as single-queue by default) and any Restaurant/Retail business
+that picks "Single queue" over one of the multi-stage templates.
+
+**Impact:** `apps/api/src/counters/counter.service.ts` (`recordPayment`,
+`complete`), `apps/web/src/app/counter/[counterId]/page.tsx`
+(`canTakePayment` replaces the narrower `isPaymentStage` check at the
+one place it gated the payment UI). Verified live: reproduced the data
+loss first (real ₹354 cart, "Appointment completed," zero invoices after)
+before touching any code, to be certain about what was actually broken;
+after the fix, confirmed `complete` now correctly 400s
+("This visit has items in the cart — record a payment to complete it")
+on the same scenario; confirmed `record-payment` now succeeds on the
+non-payment `DEPARTMENT`-stage counter and issues a real invoice
+(`INV-1`, ₹354, correctly itemized); confirmed zero regression on the
+existing PAYMENT-stage flow at Burger Junction (a real sale end to end,
+`HTTP 201`) and on a pure no-cart hospital flow (`test-flow.sh` clean,
+Orthopedics OPD's plain Complete unaffected — that queue's cart is always
+empty, so it never enters the new branch). Confirmed in the browser: the
+payment buttons correctly appear the instant an item is tapped into the
+cart, and disappear again (back to plain Complete) once the cart is paid
+and empty. `npm run typecheck` (both workspaces) and `test-flow.sh` clean.
+
+**Follow-up, same day:** the fix above only guarded the *explicit*
+Complete button. `next` and `callSpecific` auto-complete whoever the
+counter is already holding via the same private `completeToken` helper,
+but call it directly — bypassing the new check entirely. Found by
+continuing to test after the fix landed: served a customer, added an
+item, and pressed NEXT (not Complete) without paying — the sale vanished
+the exact same way. Extracted the check into one shared
+`requireNoUnpaidCart(visitId)` and call it from all three sites
+(`complete`, `next`, `callSpecific`) rather than only the one that was
+tested first. Verified live: both `next` and `callSpecific` now correctly
+400 the same way `complete` does when the held token has an unpaid cart;
+confirmed normal operation resumes immediately once that cart is actually
+paid off. `npm run typecheck` clean.
+
+---
+
 ## 2026-09-24 — Thermal receipt print styling (sixth and last of the post-POS-list follow-ups)
 
 **Decision:** Scoped this to what's actually checkable in this

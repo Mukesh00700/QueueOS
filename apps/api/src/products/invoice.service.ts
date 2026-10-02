@@ -213,7 +213,7 @@ export class InvoiceService {
           itemsSold: item?._count.id ?? 0,
           revenue: item?._sum.lineTotal ?? 0,
           paymentsRecorded: payment?._count.id ?? 0,
-          cashHandled: payment?._sum.amount ?? 0,
+          amountCollected: payment?._sum.amount ?? 0,
           refundsProcessed: refund?._count.id ?? 0,
           refundAmount: refund?._sum.amount ?? 0,
         };

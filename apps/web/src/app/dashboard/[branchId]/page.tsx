@@ -39,6 +39,15 @@ export default function DashboardPage({ params }: { params: Promise<{ branchId: 
   }, [branchId, router]);
 
   const { data, error, live } = useLive(branchId, () => api.overview(branchId), { branchId });
+  const { setVertical, vertical } = useTheme();
+
+  // Set as soon as the branch's real vertical is known, and the skeleton
+  // stays up until it's actually taken effect — otherwise there's a beat
+  // where real data renders under the previous (or default hospital)
+  // vertical's wording, e.g. "3 patients in line" on a salon's dashboard.
+  useEffect(() => {
+    if (data) setVertical(data.stats.vertical);
+  }, [data?.stats.vertical, setVertical]);
 
   if (authed !== true) {
     return <div className="min-h-screen bg-surface" />;
@@ -56,7 +65,7 @@ export default function DashboardPage({ params }: { params: Promise<{ branchId: 
     );
   }
 
-  if (!data) {
+  if (!data || vertical.id !== data.stats.vertical) {
     return (
       <div className="min-h-screen bg-surface p-6">
         <div className="mx-auto max-w-7xl space-y-4">
@@ -84,12 +93,8 @@ function DashboardBody({
   data: BranchOverview;
   live: boolean;
 }) {
-  const { t, setVertical } = useTheme();
+  const { t } = useTheme();
   const { stats, queues, timeline, activity, insights, forecast, counters } = data;
-
-  useEffect(() => {
-    setVertical(stats.vertical);
-  }, [stats.vertical, setVertical]);
 
   return (
     <AppShell

@@ -170,6 +170,7 @@ export class CounterService {
 
     const holding = await this.currentToken(counterId);
     if (holding) {
+      await this.requireResolvedBeforeCompleting(holding.visitId, counter.queueId!);
       await this.completeToken(holding, counter, actorId, 'AUTO_ON_NEXT');
     }
 
@@ -200,6 +201,7 @@ export class CounterService {
 
     const holding = await this.currentToken(counterId);
     if (holding) {
+      await this.requireResolvedBeforeCompleting(holding.visitId, counter.queueId!);
       await this.completeToken(holding, counter, actorId, 'AUTO_ON_NEXT');
     }
 
@@ -350,10 +352,7 @@ export class CounterService {
     const token = await this.currentToken(counterId);
     if (!token) throw new BadRequestException('No token is being served at this counter');
 
-    const queue = await this.prisma.queue.findUniqueOrThrow({ where: { id: counter.queueId! } });
-    if (queue.stageType === 'PAYMENT') {
-      throw new BadRequestException('This is a payment stage — record a payment to complete it');
-    }
+    await this.requireResolvedBeforeCompleting(token.visitId, counter.queueId!);
 
     await this.completeToken(token, counter, actorId, 'COMPLETED');
     await this.queues.recalculate(counter.queueId!, actorId);
@@ -426,12 +425,17 @@ export class CounterService {
     if (!token) throw new BadRequestException('No token is being served at this counter');
 
     const queue = await this.prisma.queue.findUniqueOrThrow({ where: { id: counter.queueId! } });
-    if (queue.stageType !== 'PAYMENT') {
-      throw new BadRequestException('This counter is not on a payment stage');
-    }
-
     const organizationId = await this.queues.orgIdForBranch(counter.branchId);
     const { order: openOrder } = await this.orders.openOrGetOrder(token.visitId, counter.branchId, organizationId);
+    // Always allowed on a dedicated payment stage (including the flat
+    // "type an amount" fallback below, for a vertical with no catalogue at
+    // all); off a payment stage, only when there's a real cart to charge
+    // for — "a counter already is the POS terminal" even outside a stage
+    // formally labeled PAYMENT, but there's nothing to record against an
+    // empty cart on, say, a hospital's Consultation stage.
+    if (queue.stageType !== 'PAYMENT' && openOrder.items.length === 0) {
+      throw new BadRequestException('This counter is not on a payment stage');
+    }
     const tendered = dto.tenders.reduce((sum, t) => sum + t.amount, 0);
 
     const invoice = await this.prisma.$transaction(async (tx) => {
@@ -449,6 +453,11 @@ export class CounterService {
       // a discount rule set against an empty cart has nothing to apply to.
       let discountAmount = 0;
       let discountReason: string | null = null;
+      // What actually gets written as Payment rows — capped below when
+      // there's a real bill to overshoot. The ad-hoc fallback has no such
+      // bill (the tendered amount *becomes* the total, not something it
+      // can exceed), so it's untouched there.
+      let paymentTenders = dto.tenders;
 
       if (fresh.items.length === 0) {
         // The flat "type an amount" fallback — no product, no rate, no tax.
@@ -474,6 +483,19 @@ export class CounterService {
         if (tendered < total - 0.01) {
           throw new BadRequestException(
             `Amount is less than the cart total of ${total.toFixed(2)}`,
+          );
+        }
+        if (tendered > total) {
+          // The excess is change handed back (cash) or a client-side typo
+          // (anything else) — never revenue. The counter tablet already
+          // sends a pre-capped amount in the normal flow; this is the
+          // defensive backstop so `sum(Payment.amount)` can never exceed
+          // the invoice total regardless of what a client sends, same
+          // principle as every other server-side guard this session.
+          const excess = tendered - total;
+          const lastIndex = paymentTenders.length - 1;
+          paymentTenders = paymentTenders.map((t, i) =>
+            i === lastIndex ? { ...t, amount: t.amount - excess } : t,
           );
         }
       }
@@ -508,7 +530,7 @@ export class CounterService {
       // One row per tender line — a single-method payment (the overwhelming
       // majority) writes exactly one, same as before this existed.
       await tx.payment.createMany({
-        data: dto.tenders.map((t) => ({
+        data: paymentTenders.map((t) => ({
           invoiceId: invoice.id,
           amount: t.amount,
           method: t.method,
@@ -602,6 +624,44 @@ export class CounterService {
         ...extraPayload,
       },
     });
+  }
+
+  /**
+   * Guards every way a token can be closed out *without* going through
+   * `recordPayment` — the explicit Complete button, and the implicit
+   * auto-complete `next`/`callSpecific` do on whoever the counter was
+   * already holding. Two rules, found live testing fresh businesses
+   * across several verticals and flow templates:
+   *
+   * 1. A `PAYMENT`-stage queue always requires an explicit payment,
+   *    regardless of cart state — pressing NEXT to call the next customer
+   *    instead of tapping a tender button silently skipped payment
+   *    entirely (found at a real, working restaurant's Payment Counter —
+   *    not a template edge case, a live token got marked COMPLETED with
+   *    zero invoice, zero warning).
+   * 2. Off a payment stage, a cart with real items in it can't be closed
+   *    out *if this is the last stage in the chain* — no `nextQueueId`
+   *    means the Visit closes right here, so an unpaid cart would be gone
+   *    for good (found on a fresh salon business's default single-queue
+   *    template, which has no PAYMENT stage at all). If there **is** a
+   *    next stage, the cart is fine to carry forward on the same Order —
+   *    completing this stage just advances the visit (see
+   *    AutoAdvanceService), it doesn't end it. A multi-stage retail flow
+   *    (Trial Room → Payment) depends on exactly this: ringing up what a
+   *    shopper's buying while they're still in the fitting room, then
+   *    handing off to Payment to actually collect it.
+   */
+  private async requireResolvedBeforeCompleting(visitId: string, queueId: string) {
+    const queue = await this.prisma.queue.findUniqueOrThrow({ where: { id: queueId } });
+    if (queue.stageType === 'PAYMENT') {
+      throw new BadRequestException('This is a payment stage — record a payment to complete it');
+    }
+    if (queue.nextQueueId) return;
+
+    const openOrder = await this.orders.currentOpenOrder(visitId);
+    if (openOrder && openOrder.items.length > 0) {
+      throw new BadRequestException('This visit has items in the cart — record a payment to complete it');
+    }
   }
 
   private async currentToken(counterId: string) {

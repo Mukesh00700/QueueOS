@@ -21,6 +21,15 @@ import { queueHeat } from '@/lib/utils';
 export default function CheckinPage({ params }: { params: Promise<{ branchId: string }> }) {
   const { branchId } = use(params);
   const { data, error, refresh } = useLive(branchId, () => api.checkinInfo(branchId), { branchId });
+  const { vertical, setVertical } = useTheme();
+
+  // Set as soon as the branch's real vertical is known, and the skeleton
+  // below stays up until it's actually taken effect — otherwise there's a
+  // beat where real data renders under the previous (or default hospital)
+  // vertical's wording, e.g. "patient" on a salon's check-in screen.
+  useEffect(() => {
+    if (data) setVertical(data.vertical);
+  }, [data?.vertical, setVertical]);
 
   if (error) {
     return (
@@ -39,7 +48,7 @@ export default function CheckinPage({ params }: { params: Promise<{ branchId: st
       </div>
     );
   }
-  if (!data) {
+  if (!data || vertical.id !== data.vertical) {
     return (
       <div className="mx-auto max-w-xl space-y-4 p-6">
         <Skeleton className="h-20" />
@@ -53,12 +62,9 @@ export default function CheckinPage({ params }: { params: Promise<{ branchId: st
 }
 
 function CheckinFlow({ data }: { data: CheckinInfo }) {
-  const { t, vertical, setVertical } = useTheme();
+  const { t, vertical } = useTheme();
   const router = useRouter();
 
-  useEffect(() => {
-    setVertical(data.vertical);
-  }, [data.vertical, setVertical]);
   const [queue, setQueue] = useState<QueueSnapshot | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);

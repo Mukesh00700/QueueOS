@@ -141,7 +141,7 @@ export default function StaffPerformancePage({ params }: { params: Promise<{ bra
                     <th className="px-3 py-3 text-right font-medium">Items sold</th>
                     <th className="px-3 py-3 text-right font-medium">Revenue</th>
                     <th className="px-3 py-3 text-right font-medium">Payments</th>
-                    <th className="px-3 py-3 text-right font-medium">Cash handled</th>
+                    <th className="px-3 py-3 text-right font-medium">Amount collected</th>
                     <th className="px-5 py-3 text-right font-medium">Refunds</th>
                   </tr>
                 </thead>
@@ -152,7 +152,7 @@ export default function StaffPerformancePage({ params }: { params: Promise<{ bra
                       <td className="tnum px-3 py-3 text-right text-muted">{row.itemsSold}</td>
                       <td className="tnum px-3 py-3 text-right font-semibold">₹{row.revenue.toFixed(2)}</td>
                       <td className="tnum px-3 py-3 text-right text-muted">{row.paymentsRecorded}</td>
-                      <td className="tnum px-3 py-3 text-right text-muted">₹{row.cashHandled.toFixed(2)}</td>
+                      <td className="tnum px-3 py-3 text-right text-muted">₹{row.amountCollected.toFixed(2)}</td>
                       <td className="tnum px-5 py-3 text-right text-muted">
                         {row.refundsProcessed > 0 ? `${row.refundsProcessed} · −₹${row.refundAmount.toFixed(2)}` : '—'}
                       </td>

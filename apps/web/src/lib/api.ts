@@ -513,7 +513,7 @@ export interface StaffPerformanceRow {
   itemsSold: number;
   revenue: number;
   paymentsRecorded: number;
-  cashHandled: number;
+  amountCollected: number;
   refundsProcessed: number;
   refundAmount: number;
 }
@@ -528,6 +528,8 @@ export interface ShiftRow {
   openedAt: string;
   closedAt: string | null;
   expectedCash: number;
+  /** Net sales (payments minus refunds) for every non-cash method, keyed by method. */
+  nonCash: Record<string, number>;
   variance?: number;
 }
 

@@ -66,10 +66,19 @@ export default function CounterPage({ params }: { params: Promise<{ counterId: s
     () => api.counter(counterId),
     queueId ? { queueIds: [queueId] } : {},
   );
+  const { vertical, setVertical } = useTheme();
 
   useEffect(() => {
     if (data && data.queue.id !== queueId) setQueueId(data.queue.id);
   }, [data, queueId]);
+
+  // Set as soon as the branch's real vertical is known, and the skeleton
+  // stays up until it's actually taken effect — otherwise there's a beat
+  // where real data renders under the previous (or default hospital)
+  // vertical's wording, e.g. "Next patient" on a salon's counter tablet.
+  useEffect(() => {
+    if (data) setVertical(data.vertical);
+  }, [data?.vertical, setVertical]);
 
   if (authed !== true) {
     return <div className="min-h-screen bg-surface" />;
@@ -77,7 +86,7 @@ export default function CounterPage({ params }: { params: Promise<{ counterId: s
   if (error) {
     return <div className="grid min-h-screen place-items-center bg-surface p-6 text-danger">{error}</div>;
   }
-  if (!data) {
+  if (!data || vertical.id !== data.vertical) {
     return (
       <div className="space-y-4 p-6">
         <Skeleton className="h-16" />
@@ -98,7 +107,7 @@ function CounterConsole({
   onChange: () => void;
   live: boolean;
 }) {
-  const { t, setVertical } = useTheme();
+  const { t } = useTheme();
   const [pending, setPending] = useState<string | null>(null);
   const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null);
   const [confirmingSkip, setConfirmingSkip] = useState(false);
@@ -116,13 +125,15 @@ function CounterConsole({
     successTimer.current = setTimeout(() => setMessage(null), 1800);
   }
 
-  useEffect(() => {
-    setVertical(view.vertical);
-  }, [view.vertical, setVertical]);
-
   const { counter, queue, current, upNext, order, products } = view;
   const holding = current !== null;
   const isPaymentStage = view.stageType === 'PAYMENT';
+  // A counter off a formal payment stage still needs to charge for
+  // whatever's actually in the cart — the plain Complete button used to
+  // silently drop a priced sale on any non-payment-stage queue (every
+  // single-queue business, the default template, has no PAYMENT stage at
+  // all). Matches the same rule the API now enforces server-side.
+  const canTakePayment = isPaymentStage || (order?.items.length ?? 0) > 0;
   // A branch that's never configured a catalogue (hospital, salon, temple —
   // every branch before this feature existed) should see no trace of it.
   // Checking the order's own items too matters now that the product list is
@@ -257,8 +268,18 @@ function CounterConsole({
       return;
     }
 
-    const soFar = [...tenders, { amount, method }];
     const total = order?.total ?? 0;
+    // A tender that overshoots what's actually still owed gets capped
+    // there — the rest never belonged to the sale. Only meaningful once
+    // there's a real total to overshoot (the ad-hoc "type an amount"
+    // fallback has none — whatever's typed there just *is* the sale).
+    // Only cash can hand the excess back as physical change; card/UPI/
+    // wallet are always exact, so an overshoot there is just a typo,
+    // capped the same way but with no "change due" framing.
+    const recordedAmount = total > 0 && amount > remainingBalance ? remainingBalance : amount;
+    const changeDue = method === 'CASH' ? amount - recordedAmount : 0;
+
+    const soFar = [...tenders, { amount: recordedAmount, method }];
     const totalTendered = soFar.reduce((sum, t) => sum + t.amount, 0);
 
     if (total > 0 && totalTendered < total - 0.01) {
@@ -266,7 +287,7 @@ function CounterConsole({
       const left = total - totalTendered;
       setPaymentAmount(left.toFixed(2));
       setMessage(null);
-      flashSuccess(`${method} ₹${amount.toFixed(2)} added — ₹${left.toFixed(2)} left`);
+      flashSuccess(`${method} ₹${recordedAmount.toFixed(2)} added — ₹${left.toFixed(2)} left`);
       return;
     }
 
@@ -276,7 +297,10 @@ function CounterConsole({
       await api.recordPayment(counter.id, soFar);
       setTenders([]);
       setPaymentAmount('');
-      flashSuccess(soFar.length > 1 ? 'Split payment recorded' : 'Payment recorded');
+      flashSuccess(
+        (soFar.length > 1 ? 'Split payment recorded' : 'Payment recorded') +
+          (changeDue > 0.01 ? ` — give back ₹${changeDue.toFixed(2)} change` : ''),
+      );
       onChange();
     } catch (err) {
       setMessage({ kind: 'error', text: err instanceof Error ? err.message : 'Could not record payment' });
@@ -385,7 +409,7 @@ function CounterConsole({
             >
               <ChevronRight size={26} /> Next {t.customer.toLowerCase()}
             </Button>
-            {isPaymentStage ? (
+            {canTakePayment ? (
               <div className="sm:col-span-2 space-y-2">
                 {tenders.length > 0 ? (
                   <div className="space-y-1.5 rounded-xl border border-line bg-raised p-3">

@@ -87,8 +87,13 @@ export function AppShell({
     { label: vertical.terminology.queuePlural, href: `/dashboard/${branchId}#queues`, icon: ListOrdered, badge: queueCount },
     { label: vertical.terminology.counterPlural, href: `/dashboard/${branchId}#counters`, icon: Monitor, badge: counterCount },
     // Floor tool, same access tier as a counter tablet — visible to
-    // counter staff too, not just canManage roles.
-    { label: 'Kitchen', href: `/kitchen/${branchId}`, icon: ChefHat },
+    // counter staff too, not just canManage roles. Restaurant-only: "tickets
+    // in prep" has no sensible reading for a salon haircut or a hospital
+    // consultation — found live, testing a fresh salon business, where a
+    // completed appointment showed up here looking like abandoned food.
+    ...(vertical.id === 'restaurant'
+      ? [{ label: 'Kitchen', href: `/kitchen/${branchId}`, icon: ChefHat }]
+      : []),
     { label: 'Appointments', href: `/dashboard/${branchId}#appointments`, icon: CalendarDays },
     { label: vertical.terminology.customerPlural, href: `/dashboard/${branchId}#customers`, icon: Users },
     { label: 'AI Predictions', href: `/dashboard/${branchId}#ai`, icon: Brain },

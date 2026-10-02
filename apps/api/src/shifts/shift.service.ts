@@ -15,27 +15,39 @@ export class ShiftService {
     return this.prisma.shift.findFirst({ where: { branchId, status: 'OPEN' } });
   }
 
-  /** Cash in the drawer between `openedAt` and `until`: float + CASH sales − CASH refunds. */
-  private async expectedCash(branchId: string, openingCash: number, openedAt: Date, until: Date) {
+  /**
+   * Net sales by payment method between `openedAt` and `until` (payments
+   * minus refunds, per method) — one pass covers both the cash drawer's
+   * `expectedCash` and the non-cash breakdown (card/UPI/wallet have no
+   * physical drawer to reconcile against, but staff still want to see
+   * "how much went out on each rail" without digging through invoices).
+   */
+  private async salesByMethod(branchId: string, openedAt: Date, until: Date) {
     const window = { gte: openedAt, lte: until };
-    const [cashIn, cashOut] = await Promise.all([
-      this.prisma.payment.aggregate({
-        where: { method: 'CASH', recordedAt: window, invoice: { branchId } },
+    const [paid, refunded] = await Promise.all([
+      this.prisma.payment.groupBy({
+        by: ['method'],
+        where: { recordedAt: window, invoice: { branchId } },
         _sum: { amount: true },
       }),
-      this.prisma.refund.aggregate({
-        where: { method: 'CASH', recordedAt: window, invoice: { branchId } },
+      this.prisma.refund.groupBy({
+        by: ['method'],
+        where: { recordedAt: window, invoice: { branchId } },
         _sum: { amount: true },
       }),
     ]);
-    return openingCash + (cashIn._sum.amount ?? 0) - (cashOut._sum.amount ?? 0);
+    const net: Record<string, number> = {};
+    for (const row of paid) net[row.method] = (net[row.method] ?? 0) + (row._sum.amount ?? 0);
+    for (const row of refunded) net[row.method] = (net[row.method] ?? 0) - (row._sum.amount ?? 0);
+    return net;
   }
 
   async current(branchId: string) {
     const shift = await this.openShift(branchId);
     if (!shift) return null;
-    const expectedCash = await this.expectedCash(branchId, shift.openingCash, shift.openedAt, new Date());
-    return { ...shift, expectedCash };
+    const sales = await this.salesByMethod(branchId, shift.openedAt, new Date());
+    const { CASH: cash = 0, ...nonCash } = sales;
+    return { ...shift, expectedCash: shift.openingCash + cash, nonCash };
   }
 
   async history(branchId: string, limit: number) {
@@ -48,8 +60,10 @@ export class ShiftService {
     // just as correct as a stored figure would be, without another column.
     return Promise.all(
       shifts.map(async (shift) => {
-        const expectedCash = await this.expectedCash(branchId, shift.openingCash, shift.openedAt, shift.closedAt!);
-        return { ...shift, expectedCash, variance: (shift.countedCash ?? 0) - expectedCash };
+        const sales = await this.salesByMethod(branchId, shift.openedAt, shift.closedAt!);
+        const { CASH: cash = 0, ...nonCash } = sales;
+        const expectedCash = shift.openingCash + cash;
+        return { ...shift, expectedCash, nonCash, variance: (shift.countedCash ?? 0) - expectedCash };
       }),
     );
   }
@@ -66,11 +80,13 @@ export class ShiftService {
     const shift = await this.openShift(branchId);
     if (!shift) throw new NotFoundException('No shift is currently open for this branch');
     const closedAt = new Date();
-    const expectedCash = await this.expectedCash(branchId, shift.openingCash, shift.openedAt, closedAt);
+    const sales = await this.salesByMethod(branchId, shift.openedAt, closedAt);
+    const { CASH: cash = 0, ...nonCash } = sales;
+    const expectedCash = shift.openingCash + cash;
     const updated = await this.prisma.shift.update({
       where: { id: shift.id },
       data: { status: 'CLOSED', countedCash: dto.countedCash, closedBy: userId ?? null, closedAt },
     });
-    return { ...updated, expectedCash, variance: dto.countedCash - expectedCash };
+    return { ...updated, expectedCash, nonCash, variance: dto.countedCash - expectedCash };
   }
 }

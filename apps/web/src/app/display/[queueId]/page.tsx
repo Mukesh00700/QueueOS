@@ -20,13 +20,22 @@ export default function DisplayPage({ params }: { params: Promise<{ queueId: str
   const { data, error, live } = useLive(queueId, () => api.queueDisplay(queueId), {
     queueIds: [queueId],
   });
+  const { vertical, setVertical } = useTheme();
+
+  // Set as soon as the queue's real vertical is known, and the "Loading…"
+  // state stays up until it's actually taken effect — otherwise there's a
+  // beat where real data renders under the previous (or default hospital)
+  // vertical's wording on a lobby TV nobody's there to dismiss.
+  useEffect(() => {
+    if (data) setVertical(data.vertical);
+  }, [data?.vertical, setVertical]);
 
   if (error) {
     return (
       <div className="grid min-h-screen place-items-center bg-surface text-2xl text-danger">{error}</div>
     );
   }
-  if (!data) {
+  if (!data || vertical.id !== data.vertical) {
     return <div className="grid min-h-screen place-items-center bg-surface text-muted">Loading…</div>;
   }
 
@@ -34,13 +43,9 @@ export default function DisplayPage({ params }: { params: Promise<{ queueId: str
 }
 
 function DisplayBoard({ data, live }: { data: QueueDisplay; live: boolean }) {
-  const { t, vertical, setVertical } = useTheme();
+  const { t, vertical } = useTheme();
   const { queue } = data;
   const upNext = queue.nextTokens.slice(0, 5);
-
-  useEffect(() => {
-    setVertical(data.vertical);
-  }, [data.vertical, setVertical]);
 
   return (
     <div className="flex min-h-screen flex-col bg-surface text-fg">
