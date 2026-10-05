@@ -22,6 +22,100 @@ approach over a plausible alternative, does.
 
 ---
 
+## 2026-10-05 — Fix CI: typecheck ran before the Prisma Client was generated
+
+**Decision:** `.github/workflows/ci.yml` now has an explicit `Generate
+Prisma Client` step (`npx prisma generate` in `apps/api`, no live
+database needed for it) right after `npm ci`/`build:core` and before
+`npm run typecheck`.
+
+**Reason:** The user reported a GitHub "run failed" email. Checked the
+actual run history via the API — every CI run on this repo has failed,
+including the commit that first added CI, three weeks before this
+session. The typecheck step was failing with errors like `Property
+'PrismaClientKnownRequestError' does not exist on type 'typeof Prisma'`
+and `Parameter 'tx' implicitly has an 'any' type` — classic symptoms of
+the generated Prisma Client's types not existing yet. The workflow only
+ever called `prisma generate` inside the much-later "Push schema and
+seed demo data" step, after typecheck had already run. Locally this
+never surfaced because a generated client was already sitting in
+`node_modules/.prisma` from earlier manual setup — a fresh CI checkout
+has nothing to inherit that from.
+
+**Impact:** `.github/workflows/ci.yml` only. Verified the exact new
+step's command (`npx prisma generate` from `apps/api`) runs clean and
+produces a client `npm run typecheck` passes against, matching what CI
+will now run. Not yet confirmed green on GitHub's actual runners — that
+needs the next push.
+
+---
+
+## 2026-10-05 — Extend test-flow.sh to cover the commerce lifecycle
+
+**Decision:** `test-flow.sh` only ever tested the queue lifecycle
+(check-in → recall → serve → complete) against Apollo Hospital's seeded
+data — none of the commerce work from the last few days (payment
+capping, non-cash tracking, the customer directory) had any automated
+coverage; every one of those fixes was only ever verified by hand, once.
+Added sections 12–16, appended to the same file rather than a new
+script: register a brand-new QSR business live (this also re-verifies
+the auto-counter-per-queue fix, since the test immediately looks up the
+auto-provisioned Ordering counter), create a product, open a shift, ring
+up a cart and overpay it by CASH, then again by CARD, close the shift,
+and check the customer directory — asserting on the actual returned
+figures at each step, not just printing them for a human to eyeball.
+Registering a fresh business rather than depending on richer seed data
+was a deliberate choice: `prisma/seed.ts` only gives Burger Junction one
+bare queue and seeds no products/invoices/shifts/customers at all, so
+there was no existing fixture this could have run against — a
+self-contained registration is also more realistic (it is literally the
+real onboarding path) and avoids ever going stale if the seed script
+changes later.
+
+Added a small `assert_eq` helper (print-and-exit-1 on mismatch) — every
+section before this one only prints values or checks HTTP status codes,
+which is fine for a human skimming logs but doesn't fail the build when
+a money calculation quietly goes wrong. The assertions check the things
+that actually matter: the shift's `expectedCash` increases by exactly
+the bill (not what was tendered) after a cash overpay, a card overpay
+never touches `expectedCash` at all but does show up in `nonCash.CARD`,
+the closed shift's variance is exactly zero, and the customer
+directory's `totalSpent` matches the real invoice total on both the list
+and detail endpoints.
+
+**Reason:** Asked directly — "we need to extend it for the feature we
+built later." Confirmed the fix is a real regression guard, not
+decorative, by temporarily disabling the server-side cap
+(`if (false && tendered > total)` in `counter.service.ts`) and
+re-running: the invoice-total assertion still passed (`Invoice.total` is
+computed from the cart, not the tender, so it was never going to catch
+this), but the shift `expectedCash` assertion correctly failed —
+"expected '710.00', got '800.00'" — and the script exited 1. Restored
+the real code and reran clean before committing. That also surfaced a
+small but real learning: the invoice-total assertion in section 13/14
+is a sanity check, not the regression guard for the cap bug — the shift
+assertion is what's actually load-bearing there.
+
+**Impact:** `apps/api/test-flow.sh` only — no application code changed.
+Runs as part of the existing CI step (no `.github/workflows/ci.yml`
+change needed; it already calls this exact script). Verified: full
+script passes clean from a freshly reseeded database (`npm run
+db:seed`), end to end, 9/9 new assertions pass; verified it actually
+fails when the thing it's protecting breaks (above); confirmed
+`npm run typecheck` on both workspaces is unaffected (no source edits
+survived). Running this script locally against the dev database
+requires a fresh `npm run db:seed` first if it's been run before in the
+same session — registration isn't idempotent the way the rest of the
+script's customer upserts are, so a second run hits a duplicate-email
+error on `owner@testqsr.queueos.dev`. CI is unaffected since it always
+seeds a brand-new database per run. Note for next session: re-seeding
+to test this wiped every business registered live during browser QA
+this week (Trendy Threads, Glamour Cuts, City RTO Office, Fresh Counter
+Test) — the published "QueueOS Test Console" artifact's credentials for
+those no longer work against the local dev DB until they're re-created.
+
+---
+
 ## 2026-10-03 — Add a customer directory; remove the dead "Reports" nav link
 
 **Decision:** The sidebar has had a `vertical.terminology.customerPlural`

@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
-# End-to-end smoke test for the queue lifecycle.
-# Exercises: login -> check-in -> NEXT -> RECALL -> customer confirms -> COMPLETE,
-# plus the recall position penalty and RBAC enforcement.
+# End-to-end smoke test for the queue lifecycle, then the commerce lifecycle.
+# Part 1 exercises: login -> check-in -> NEXT -> RECALL -> customer confirms ->
+# COMPLETE, plus the recall position penalty and RBAC enforcement.
+# Part 2 registers a brand-new business and exercises: auto-provisioned
+# counters -> ring up a cart -> a tender that overshoots the bill gets capped
+# (cash and non-cash) -> the shift and customer directory reflect the exact
+# sale, not what was typed in.
 # Run with the API already listening on :4000.
 set -euo pipefail
 
@@ -9,6 +13,18 @@ API=http://localhost:4000/api
 
 # Reads JSON from stdin into `r` and prints the given JS expression.
 j() { node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const r=JSON.parse(d);console.log($1)})"; }
+
+# Fails the script (and so the CI job) the moment a figure the money logic
+# computed doesn't match what it should — printing alone, the style every
+# section above this uses, would let a broken calculation sail through
+# unnoticed since nothing reads the log on every run.
+assert_eq() {
+  if [ "$1" != "$2" ]; then
+    echo "  ASSERTION FAILED ($3): expected '$2', got '$1'" >&2
+    exit 1
+  fi
+  echo "  OK ($3): $1"
+}
 
 echo "=== 1. Login as branch admin ==="
 TOKEN=$(curl -s -X POST "$API/auth/login" -H 'content-type: application/json' \
@@ -116,6 +132,79 @@ TCOUNTER=$(curl -s "${AUTH[@]}" "$API/branches/$BRANCH/counters" | j "r.find(c=>
 echo -n "  call-specific (out of FIFO order) -> HTTP "
 curl -s -o /dev/null -w "%{http_code}\n" -X POST "$API/counters/$TCOUNTER/call/$T1ID" -H "authorization: Bearer $TOKEN"
 curl -s "$API/t/$T1" | j "'  '+r.displayCode+' -> '+r.status+' at '+r.counterName"
+
+echo
+echo "=== 12. Register a fresh QSR business: auto-provisioned counters, a product, a shift ==="
+REG=$(curl -s -X POST "$API/auth/register" -H 'content-type: application/json' -d '{
+  "businessName":"Test QSR Co",
+  "vertical":"restaurant",
+  "flowTemplate":"qsr",
+  "ownerName":"Test Owner",
+  "email":"owner@testqsr.queueos.dev",
+  "password":"queueos123"
+}')
+QTOKEN=$(echo "$REG" | j "r.accessToken")
+QBRANCH=$(echo "$REG" | j "r.user.branchId")
+QAUTH=(-H "authorization: Bearer $QTOKEN")
+ORDERQ=$(curl -s "${QAUTH[@]}" "$API/branches/$QBRANCH/queues" | j "r.find(q=>q.name==='Ordering').id")
+ORDERC=$(curl -s "${QAUTH[@]}" "$API/branches/$QBRANCH/counters" | j "r.find(c=>c.queue&&c.queue.id==='$ORDERQ').id")
+echo "  registered, Ordering queue + its auto-provisioned counter both exist (the Sept-29 auto-counter fix)"
+
+PRODUCT=$(curl -s -X POST "$API/products" "${QAUTH[@]}" -H 'content-type: application/json' \
+  -d '{"name":"Test Combo","category":"Mains","price":100,"gstRate":5}' | j "r.id")
+echo "  product created: ₹100 + 5% GST"
+
+curl -s -X POST "$API/branches/$QBRANCH/shifts/open" "${QAUTH[@]}" -H 'content-type: application/json' \
+  -d '{"openingCash":500}' > /dev/null
+echo "  shift opened with a ₹500 float"
+
+echo
+echo "=== 13. A CASH tender that overshoots the bill is capped, not recorded verbatim ==="
+QCODE1=$(curl -s -X POST "$API/queues/$ORDERQ/tokens" -H 'content-type: application/json' \
+  -d '{"name":"Cash Overpay","phone":"+919800050001"}' | j "r.code")
+curl -s -X POST "$API/counters/$ORDERC/next" "${QAUTH[@]}" > /dev/null
+curl -s -X POST "$API/counters/$ORDERC/order/items" "${QAUTH[@]}" -H 'content-type: application/json' \
+  -d "{\"productId\":\"$PRODUCT\",\"quantity\":2}" > /dev/null
+# 2 x ₹100 + 5% GST = ₹210 owed. Tendering ₹300 CASH should record exactly
+# ₹210 (the ₹90 excess is change handed back, never revenue) -- this is the
+# server-side cap from the 2026-10-02 cash-cap fix, independent of whatever
+# the counter tablet UI already caps client-side.
+curl -s -X POST "$API/counters/$ORDERC/record-payment" "${QAUTH[@]}" -H 'content-type: application/json' \
+  -d '{"tenders":[{"amount":300,"method":"CASH"}]}' > /dev/null
+INV1=$(curl -s "${QAUTH[@]}" "$API/branches/$QBRANCH/invoices?limit=1")
+assert_eq "$(echo "$INV1" | j "r[0].total.toFixed(2)")" "210.00" "invoice capped at the bill, not the ₹300 tendered"
+SHIFT1=$(curl -s "${QAUTH[@]}" "$API/branches/$QBRANCH/shifts/current")
+assert_eq "$(echo "$SHIFT1" | j "r.expectedCash.toFixed(2)")" "710.00" "shift cash is float(500) + bill(210), not float + tendered(300)"
+
+echo
+echo "=== 14. A non-cash tender that overshoots is capped too, and tracked separately from cash ==="
+QCODE2=$(curl -s -X POST "$API/queues/$ORDERQ/tokens" -H 'content-type: application/json' \
+  -d '{"name":"Card Overpay","phone":"+919800050002"}' | j "r.code")
+curl -s -X POST "$API/counters/$ORDERC/next" "${QAUTH[@]}" > /dev/null
+curl -s -X POST "$API/counters/$ORDERC/order/items" "${QAUTH[@]}" -H 'content-type: application/json' \
+  -d "{\"productId\":\"$PRODUCT\",\"quantity\":2}" > /dev/null
+curl -s -X POST "$API/counters/$ORDERC/record-payment" "${QAUTH[@]}" -H 'content-type: application/json' \
+  -d '{"tenders":[{"amount":250,"method":"CARD"}]}' > /dev/null
+INV2=$(curl -s "${QAUTH[@]}" "$API/branches/$QBRANCH/invoices?limit=1")
+assert_eq "$(echo "$INV2" | j "r[0].total.toFixed(2)")" "210.00" "card invoice capped at the bill too, no 'change' involved"
+SHIFT2=$(curl -s "${QAUTH[@]}" "$API/branches/$QBRANCH/shifts/current")
+assert_eq "$(echo "$SHIFT2" | j "r.expectedCash.toFixed(2)")" "710.00" "a card sale must not move the cash-drawer figure at all"
+assert_eq "$(echo "$SHIFT2" | j "r.nonCash.CARD.toFixed(2)")" "210.00" "non-cash breakdown shows the capped card total (the 2026-10-03 tracking fix)"
+
+echo
+echo "=== 15. Close the shift: counted cash matches to the rupee ==="
+CLOSE=$(curl -s -X POST "$API/branches/$QBRANCH/shifts/close" "${QAUTH[@]}" -H 'content-type: application/json' \
+  -d '{"countedCash":710}')
+assert_eq "$(echo "$CLOSE" | j "r.variance.toFixed(2)")" "0.00" "counted cash settles exactly against the one real cash sale"
+
+echo
+echo "=== 16. Customer directory reflects both sales correctly ==="
+DIR=$(curl -s "${QAUTH[@]}" "$API/branches/$QBRANCH/customers")
+assert_eq "$(echo "$DIR" | j "r.find(c=>c.phone==='+919800050001').totalSpent.toFixed(2)")" "210.00" "cash customer's total matches their capped invoice"
+assert_eq "$(echo "$DIR" | j "r.find(c=>c.phone==='+919800050002').totalSpent.toFixed(2)")" "210.00" "card customer's total matches their capped invoice"
+CUST1=$(echo "$DIR" | j "r.find(c=>c.phone==='+919800050001').id")
+DETAIL=$(curl -s "${QAUTH[@]}" "$API/branches/$QBRANCH/customers/$CUST1")
+assert_eq "$(echo "$DETAIL" | j "r.visits[0].invoices[0].total.toFixed(2)")" "210.00" "customer detail's linked invoice matches too"
 
 echo
 echo "Done."

@@ -54,6 +54,17 @@ jobs:
       # built first or it fails against a stale/missing dist.
       - run: npm run build:core
 
+      # Generates the Prisma Client's types (Prisma.TransactionClient,
+      # Prisma.PrismaClientKnownRequestError, etc.) from schema.prisma --
+      # no live database needed for this, just the schema file from
+      # checkout. Has to happen before typecheck: every run of this
+      # workflow has failed typecheck without it, since there's nothing
+      # here yet to inherit a previously-generated client from the way a
+      # local checkout does.
+      - name: Generate Prisma Client
+        working-directory: apps/api
+        run: npx prisma generate
+
       - run: npm run typecheck
 
       # Production build verification for both apps — dev mode (what every
