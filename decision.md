@@ -22,6 +22,63 @@ approach over a plausible alternative, does.
 
 ---
 
+## 2026-10-03 — Add a customer directory; remove the dead "Reports" nav link
+
+**Decision:** The sidebar has had a `vertical.terminology.customerPlural`
+nav item (e.g. "Patients", "Guests") since early in the build, but it
+pointed at a `#customers` page anchor that was never built — and a
+`Customer` model has existed the whole time too, used only internally
+for loyalty lookups during checkout. Built the missing page: `GET
+branches/:id/customers` (`apps/api/src/customers/customer.service.ts`,
+new) lists everyone with a visit at that branch — visit count, total
+spent (summed from issued invoices), loyalty points, accessibility
+flags, last-visit — and `GET branches/:id/customers/:customerId` returns
+one customer's full visit history at that branch, each visit's queue
+token(s) and any linked invoice. Both routes live in
+`branch.controller.ts` behind the same `requireBranchScope` helper every
+other branch-scoped read already uses, not a new access-check
+reinvented for this feature. The frontend is two pages
+(`dashboard/[branchId]/customers/{page.tsx,[customerId]/page.tsx}`)
+following the exact Invoices/Staff-Performance table pattern, with a
+client-side name/phone filter — branch customer counts don't justify a
+server-side search endpoint yet. The nav item now points at the real
+page and is gated to `canManage` (Admin+), matching Invoices/Shifts/
+Staff-Performance — it was previously shown to counter staff too, which
+made no sense for what is personal/financial data. Also removed the
+"Reports" nav item: it pointed at a `#reports` anchor that never existed
+either, and isn't a real gap — Invoices, Staff Performance, Shifts, and
+the Owner's cross-branch summary already cover reporting as their own
+pages.
+
+**Reason:** Flagged while auditing the dashboard's own nav against its
+pages for the "what's left to build" question — three nav items (this
+one, Appointments, Reports) led nowhere. Customer directory was the
+highest-value fix of the three: the data already existed, it's pure UI
+work, and it's the kind of view an Admin reaches for constantly
+(Appointments needs a real new domain — booking, capacity conflicts with
+walk-ins — and was deliberately left for its own scoping pass).
+
+**Impact:** New `apps/api/src/customers/customer.service.ts`, registered
+in `app.module.ts`; two new routes in `branch.controller.ts`; new
+`CustomerSummary`/`CustomerDetail` types and `customers`/`customer` calls
+in `apps/web/src/lib/api.ts`; two new pages under
+`apps/web/src/app/dashboard/[branchId]/customers/`;
+`apps/web/src/components/app-shell.tsx` (real Customers link, `canManage`
+gate, Reports link removed). No schema change — reads existing
+`Customer`/`Visit`/`Token`/`Order`/`Invoice` relations. `test-flow.sh`
+and both workspaces' typecheck clean. Verified live: Apollo Hospital's
+directory lists its 200 seeded patients with correct Senior pills,
+client-side search narrows correctly; Burger Junction's directory shows
+this session's test sales with exact figures (Test Customer Change →
+₹835.80, matching INV-11 exactly; Card/Split Overshoot tests → ₹417.90
+each), the detail page shows the Ordering→Payment multi-stage hand-off
+as two tokens on one visit, and its invoice pill links straight to the
+real `/invoices/:id` page. Cross-org access correctly blocked (signed in
+as Apollo's admin, hitting Burger Junction's branch returned "Branch not
+found" rather than leaking data).
+
+---
+
 ## 2026-10-02 — Track non-cash sales per shift, fix mislabeled "cash handled" metric
 
 **Decision:** Asked whether UPI/card/wallet sales get tracked anywhere —

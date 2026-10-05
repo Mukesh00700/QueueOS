@@ -518,6 +518,49 @@ export interface StaffPerformanceRow {
   refundAmount: number;
 }
 
+export interface CustomerSummary {
+  id: string;
+  name: string;
+  phone: string;
+  email: string | null;
+  loyaltyPoints: number;
+  isSeniorCitizen: boolean;
+  needsAssistance: boolean;
+  visitCount: number;
+  totalSpent: number;
+  lastVisitAt: string;
+}
+
+export interface CustomerInvoiceRow {
+  id: string;
+  number: string;
+  total: number;
+  status: string;
+  createdAt: string;
+}
+
+export interface CustomerVisitRow {
+  id: string;
+  createdAt: string;
+  status: string;
+  tokens: { code: string; status: string; queueName: string }[];
+  invoices: CustomerInvoiceRow[];
+}
+
+export interface CustomerDetail {
+  id: string;
+  name: string;
+  phone: string;
+  email: string | null;
+  loyaltyPoints: number;
+  isSeniorCitizen: boolean;
+  needsAssistance: boolean;
+  customerSince: string;
+  visitCount: number;
+  totalSpent: number;
+  visits: CustomerVisitRow[];
+}
+
 export interface ShiftRow {
   id: string;
   openingCash: number;
@@ -593,6 +636,10 @@ export const api = {
     request<StaffPerformanceRow[]>(
       `/branches/${branchId}/staff-performance${since ? `?since=${encodeURIComponent(since)}` : ''}`,
     ),
+
+  customers: (branchId: string) => request<CustomerSummary[]>(`/branches/${branchId}/customers`),
+  customer: (branchId: string, customerId: string) =>
+    request<CustomerDetail>(`/branches/${branchId}/customers/${customerId}`),
 
   kitchenBoard: (branchId: string) => request<KitchenTicket[]>(`/kitchen/${branchId}`),
   setKitchenItemStatus: (itemId: string, status: 'QUEUED' | 'PREPARING' | 'READY') =>

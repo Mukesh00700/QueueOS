@@ -9,6 +9,7 @@ import { InsightsService } from '../insights/insights.service';
 import { CounterService } from '../counters/counter.service';
 import { InvoiceService } from '../products/invoice.service';
 import { ShiftService } from '../shifts/shift.service';
+import { CustomerService } from '../customers/customer.service';
 import { ProcurementService } from '../procurement/procurement.service';
 import { formatDisplayCode } from '../queues/queue.util';
 import { MinRole, Public, type AuthedRequest } from '../auth/auth.guard';
@@ -29,6 +30,7 @@ export class BranchController {
     private readonly counterService: CounterService,
     private readonly invoiceService: InvoiceService,
     private readonly shiftService: ShiftService,
+    private readonly customerService: CustomerService,
     private readonly procurement: ProcurementService,
   ) {}
 
@@ -283,6 +285,24 @@ export class BranchController {
     const sinceDate = since ? new Date(since) : startOfToday();
     if (Number.isNaN(sinceDate.getTime())) throw new BadRequestException('Invalid `since` date');
     return this.invoiceService.staffPerformance(id, sinceDate);
+  }
+
+  @MinRole('ADMIN')
+  @Get('branches/:id/customers')
+  async customers(@Param('id') id: string, @Query('limit') limit: string | undefined, @Req() req: AuthedRequest) {
+    await this.requireBranchScope(id, req.user!);
+    return this.customerService.listForBranch(id, Math.min(500, Number(limit) || 200));
+  }
+
+  @MinRole('ADMIN')
+  @Get('branches/:id/customers/:customerId')
+  async customer(
+    @Param('id') id: string,
+    @Param('customerId') customerId: string,
+    @Req() req: AuthedRequest,
+  ) {
+    await this.requireBranchScope(id, req.user!);
+    return this.customerService.getForBranch(id, customerId);
   }
 
   /**
